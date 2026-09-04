@@ -57,3 +57,6 @@ site/
 .DS_Store
 Thumbs.db
 uv.lock
+
+# Machine-specific Compose overrides
+docker-compose.override.yml

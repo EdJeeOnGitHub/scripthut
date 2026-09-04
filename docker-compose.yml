@@ -1,0 +1,44 @@
+# ScriptHut control plane.
+#
+# The container is the *scripthut host*: it holds the run history, polls the
+# schedulers over SSH, and serves the web UI. Machine-specific mounts (SSH
+# keys, project directories, dataset roots) belong in
+# docker-compose.override.yml, which Compose merges in automatically.
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Paths inside the container deliberately mirror the host, so a single
+# ~/.config/scripthut/scripthut.yaml is valid for both the containerised
+# server and the CLI running on the host.
+
+services:
+  scripthut:
+    build: .
+    image: scripthut:local
+    container_name: scripthut
+    restart: unless-stopped
+    ports:
+      # Bind the LAN interface, never 0.0.0.0. This host carries tun0, the
+      # Booth/UChicago VPN, and an unprefixed publication is DNAT'd and
+      # reachable from the university network — it bypasses filter/INPUT,
+      # so the tun0 rule there does not cover it.
+      - "192.168.50.66:8000:8000"
+    volumes:
+      # User-global config: backends, sources, datasets, settings.
+      - ${HOME}/.config/scripthut/scripthut.yaml:/root/.config/scripthut/scripthut.yaml:ro
+      # Run history, logs, cached clones (settings.data_dir).
+      - scripthut-data:/root/.cache/scripthut
+    # --host 0.0.0.0 overrides settings.server_host, which stays 127.0.0.1
+    # so the CLI's own autostarted daemon does not listen on the network.
+    command: ["scripthut", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  scripthut-data:
