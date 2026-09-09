@@ -124,6 +124,38 @@ def _make_backend(sacct_id_stdout: str = "", sacct_stdout: str = "") -> SlurmBac
 class TestSacctParsesState:
     """End-to-end: mock sacct output → get_job_stats → verify JobStats.state."""
 
+    @pytest.mark.parametrize("batch_first", [False, True], ids=["parent-first", "batch-first"])
+    @pytest.mark.parametrize("parent_state,batch_state,batch_exit,expected_state,expected_exit", [
+        ("TIMEOUT", "CANCELLED", "0:15", "TIMEOUT", 0),
+        ("COMPLETED", "OUT_OF_MEMORY", "0:9", "OUT_OF_MEMORY", 0),
+        ("COMPLETED", "COMPLETED", "7:0", "FAILED", 7),
+        ("CANCELLED by 1000", "CANCELLED", "0:15", "CANCELLED", 0),
+    ])
+    async def test_parent_batch_precedence(
+        self, batch_first, parent_state, batch_state, batch_exit, expected_state, expected_exit,
+    ):
+        """Keep timeout evidence without masking batch failures or losing statistics."""
+        rows = [
+            f"123|00:00:05|00:01:00|2||2026-02-11T10:00:00|"
+            f"2026-02-11T10:01:00|{parent_state}|0:0",
+            f"123.batch|00:00:30|00:01:00|2|1024M|2026-02-11T10:00:00|"
+            f"2026-02-11T10:01:00|{batch_state}|{batch_exit}",
+        ]
+        if batch_first:
+            rows.reverse()
+        backend = _make_backend(sacct_id_stdout="123\n", sacct_stdout="\n".join(rows))
+
+        stats = (await backend.get_job_stats(["123"]))["123"]
+
+        assert stats.state == expected_state
+        # Numeric exit_code preserves Slurm's exit component, not 128 + signal.
+        assert stats.exit_code == expected_exit
+        assert stats.cpu_efficiency == 25.0
+        assert stats.total_cpu == "30s"
+        assert stats.max_rss == "1.0G"
+        assert stats.start_time.isoformat() == "2026-02-11T10:00:00+00:00"
+        assert stats.end_time.isoformat() == "2026-02-11T10:01:00+00:00"
+
     @pytest.mark.asyncio
     async def test_oom_state_parsed(self):
         """sacct reporting OUT_OF_MEMORY should populate state correctly."""
@@ -400,4 +432,3 @@ class TestSlurmGenerateScriptGres:
         task = TaskDefinition(id="t1", name="test", command="pwd")
         script = self._backend().generate_script(task, "r1", "/logs")
         assert "--gres" not in script
-

@@ -480,6 +480,7 @@ class SlurmBackend(JobBackend):
         sacct_start: dict[str, datetime | None] = {}  # job_id -> actual start time
         sacct_end: dict[str, datetime | None] = {}  # job_id -> actual end time
         sacct_state: dict[str, str] = {}  # job_id -> State from main entry
+        parent_timeouts: set[str] = set()
         # Numeric exit code, parsed from "exit:signal". .batch (where
         # the user's script ran) wins on conflict; main entry is the
         # fallback for jobs without a .batch step.
@@ -539,6 +540,8 @@ class SlurmBackend(JobBackend):
                 main_data[raw_id] = (elapsed_s, alloc_cpus, main_cpu_s)
                 # Strip trailing modifiers like "CANCELLED by 12345"
                 main_state = job_state.split()[0] if job_state else ""
+                if main_state == "TIMEOUT":
+                    parent_timeouts.add(raw_id)
                 # Only set if .batch hasn't already overridden with a failure
                 if raw_id not in sacct_state:
                     sacct_state[raw_id] = main_state
@@ -563,6 +566,11 @@ class SlurmBackend(JobBackend):
                         sacct_end[raw_id] = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
                 except ValueError:
                     pass
+
+        # A timeout cancels the batch step; keep the parent's cause regardless
+        # of row order, rather than reporting the resulting batch cancellation.
+        for job_id in parent_timeouts:
+            sacct_state[job_id] = "TIMEOUT"
 
         # --- Compute final stats ---
         for job_id in valid_ids:
