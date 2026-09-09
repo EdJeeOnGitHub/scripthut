@@ -58,9 +58,9 @@ class SSHClient:
             logger.info(f"Connecting to {self.user}@{self.host}:{self.port}")
 
             # Configure known_hosts handling
-            known_hosts_arg: str | Path | None
+            known_hosts_arg: str | None
             if self.known_hosts is not None:
-                known_hosts_arg = self.known_hosts
+                known_hosts_arg = str(self.known_hosts)
             else:
                 # None means don't validate (for development)
                 known_hosts_arg = None
