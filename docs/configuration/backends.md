@@ -28,6 +28,7 @@ backends:
       cert_path: ~/.ssh/id_rsa-cert.pub   # optional
       known_hosts: ~/.ssh/known_hosts      # optional
     account: pi-faculty       # optional
+    qos: buyin               # optional, cluster-specific
     login_shell: false        # optional, default: false
     max_concurrent: 100       # optional, default: 100
     clone_dir: ~/scripthut-repos  # optional, disk usage reported in UI
@@ -39,6 +40,7 @@ backends:
 | `type` | string | **required** | Must be `"slurm"`. |
 | `ssh` | object | **required** | SSH connection settings (see [SSH Config](#ssh-config) below). |
 | `account` | string | `null` | Slurm account to charge jobs to. Passed as `--account` to `sbatch`. |
+| `qos` | string | `null` | Slurm QoS emitted as `#SBATCH --qos`. Omit to use the scheduler default. Must be a nonempty token without whitespace/control characters; backend changes require restart. |
 | `login_shell` | boolean | `false` | If `true`, job scripts use `#!/bin/bash -l` to source your login profile (`.bash_profile`, etc.). |
 | `max_concurrent` | integer | `100` | Maximum total concurrent jobs across all runs on this backend. Must be >= 1. |
 | `clone_dir` | string | `~/scripthut-repos` | Path on the backend whose disk usage is shown in the backend status panel. Typically the parent directory where source repos are cloned. |
