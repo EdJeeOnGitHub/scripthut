@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class EnvRule(BaseModel):
@@ -137,6 +137,19 @@ class SlurmBackendConfig(BaseModel):
         default=None,
         description="Slurm account to charge jobs to (e.g., phd, pi-faculty)",
     )
+    qos: str | None = Field(default=None, description="Slurm QoS for submitted jobs")
+
+    @field_validator("qos")
+    @classmethod
+    def validate_qos(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)
+        ):
+            raise ValueError(
+                "qos must be a nonempty token without whitespace or control characters"
+            )
+        return value
+
     partition_map: dict[str, str] = Field(
         default_factory=dict,
         description=(

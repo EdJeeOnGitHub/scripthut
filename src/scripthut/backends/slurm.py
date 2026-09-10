@@ -310,6 +310,7 @@ class SlurmBackend(JobBackend):
         account: str | None = None,
         partition_map: dict[str, str] | None = None,
         default_partition: str | None = None,
+        qos: str | None = None,
     ) -> None:
         """Initialize with an SSH client connected to the Slurm head node.
 
@@ -326,6 +327,7 @@ class SlurmBackend(JobBackend):
         """
         self._ssh = ssh_client
         self._account = account
+        self._qos = qos
         self._partition_map = partition_map or {}
         self._default_partition = default_partition
 
@@ -1100,13 +1102,14 @@ class SlurmBackend(JobBackend):
         run_summary_path = task.get_run_summary_path(run_id, log_dir)
         shebang = "#!/bin/bash -l" if login_shell else "#!/bin/bash"
         account_line = f"#SBATCH --account={account}\n" if account else ""
+        qos_line = f"#SBATCH --qos={self._qos}\n" if self._qos else ""
         gres_line = f"#SBATCH --gres={task.gres}\n" if task.gres else ""
         partition = self._resolve_partition(task.partition)
 
         header = f"""{shebang}
 #SBATCH --job-name="{task.name}"
 #SBATCH --partition={partition}
-{account_line}#SBATCH --cpus-per-task={task.cpus}
+{account_line}{qos_line}#SBATCH --cpus-per-task={task.cpus}
 #SBATCH --mem={task.memory}
 #SBATCH --time={task.time_limit}
 {gres_line}#SBATCH --output={output_path}
