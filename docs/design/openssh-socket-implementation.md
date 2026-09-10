@@ -310,7 +310,7 @@ Julia/modules setup, and retained-results layout are separate work.
 | Phase | Status | Evidence |
 | --- | --- | --- |
 | 1 | Complete | `8d8c2e1` (known-hosts), `ffb4597` (TIMEOUT); validation below |
-| 2 | Complete | `9305a64`: external sockets, shared relay, status API/UI; validation below |
+| 2 | Complete | `9305a64` and backend-card follow-up on the same branch; validation below |
 | 3 | Not started | Dirty-save and scheduling failure paths identified |
 | 4 | Not started | Browser access/lifecycle requirements recorded |
 | 5 | Not started | Existing deployment facts in handoff; Serve route checked during planning |
@@ -374,7 +374,8 @@ Slurm policy, deployment patch, or grace-period behavior was changed.
 ### Phase 2 validation (2026-09-10)
 
 Branch: `feat/openssh-external-sockets`, based on Phase 1 (`ffb4597`).
-Implementation commit: `9305a64`.
+Core transport/API commit: `9305a64`; the backend-card template and this evidence
+record are tracked in follow-up commits on the same branch.
 The environment remains the isolated Python 3.14.7 virtualenv recorded above.
 The real client is OpenSSH 10.5p1 with OpenSSL 3.6.4.
 All live SSH tests use a disposable loopback AsyncSSH server and test-owned

@@ -39,7 +39,7 @@
             <time class="text-xs text-gray-400 local-time" datetime="{{ backend.status.last_poll.isoformat() }}" data-format="time"></time>
             {% endif %}
             {% else %}
-            <span class="text-sm text-red-700">Disconnected</span>
+            <span class="text-sm text-red-700">{% if backend.socket_connection and backend.socket_connection.state == 'connection_failed' %}Connection failed{% else %}Disconnected{% endif %}</span>
             {% if backend.status.last_poll_duration_ms is not none %}
             <span class="text-xs font-mono text-gray-400">{{ backend.status.last_poll_duration_ms
                 }}ms</span>
@@ -56,6 +56,31 @@
             </button>
         </div>
     </div>
+    {% if backend.socket_connection %}
+    {% set connection = backend.socket_connection %}
+    <details class="ml-4 mt-1 text-xs text-gray-600">
+        <summary class="cursor-pointer">OpenSSH connection details</summary>
+        <div class="space-y-1 p-2">
+            <div>Socket: <code>{{ connection.control_path }}</code></div>
+            <div>Socket present: {{ 'yes' if connection.socket_exists else 'no' }} · Master answered last check: {{ 'yes' if connection.master_responsive else 'no' }}</div>
+            <div>Configured idle persistence: {{ connection.control_persist }}</div>
+            <div>Last successful remote check:
+                {% if connection.last_successful_check %}<time class="local-time" datetime="{{ connection.last_successful_check.isoformat() }}" data-format="time"></time>{% else %}Not yet verified{% endif %}
+            </div>
+            <div>Connection first observed:
+                {% if connection.first_observed_at %}<time class="local-time" datetime="{{ connection.first_observed_at.isoformat() }}" data-format="time"></time>{% else %}Unknown{% endif %}
+            </div>
+            <button type="button" class="px-2 py-1 bg-gray-100 rounded"
+                data-url="/api/v1/backends/{{ name | urlencode }}/connection/check"
+                onclick="this.disabled=true; fetch(this.dataset.url,{method:'POST'}).then(r=>{if(!r.ok)throw new Error('Check failed');location.reload()}).catch(()=>{this.disabled=false;this.textContent='Check failed — try again'})">Check connection</button>
+            {% if connection.state != 'connected' %}
+            <div>Run on the host managing this socket (prepare its private directory first):</div>
+            <textarea readonly rows="3" class="w-full font-mono p-1" aria-label="Terminal connection command" onclick="this.select()">{{ connection.terminal_command }}</textarea>
+            {% endif %}
+            {% if connection.error %}<div class="text-red-700">{{ connection.error }}</div>{% endif %}
+        </div>
+    </details>
+    {% endif %}
     {% if backend.enabled and backend.status.error %}
     <div class="ml-4 p-2 bg-red-100 rounded text-sm text-red-700 font-mono text-xs">
         {{ backend.status.error }}
