@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scripthut.backends.base import DiskInfo
-    from scripthut.ssh.client import SSHClient
+    from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def parse_df_output(stdout: str) -> tuple[int, int] | None:
 
 
 async def fetch_log_via_ssh(
-    ssh: SSHClient,
+    ssh: ExecutionClient,
     log_path: str,
     tail_lines: int | None = None,
 ) -> tuple[str | None, str | None]:
@@ -142,7 +142,7 @@ async def fetch_log_via_ssh(
     return stdout, None
 
 
-async def fetch_disk_info(ssh: SSHClient, path: str) -> DiskInfo | None:
+async def fetch_disk_info(ssh: ExecutionClient, path: str) -> DiskInfo | None:
     """Run ``df -Pk <path>`` over SSH and return a :class:`DiskInfo`.
 
     Returns None on SSH error, non-zero exit, or unparseable output.

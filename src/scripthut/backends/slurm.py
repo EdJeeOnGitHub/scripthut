@@ -27,7 +27,7 @@ from scripthut.backends.utils import (
     parse_rss_to_bytes,
 )
 from scripthut.models import JobState, SlurmJob
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 if TYPE_CHECKING:
     from scripthut.runs.models import TaskDefinition
@@ -306,7 +306,7 @@ class SlurmBackend(JobBackend):
 
     def __init__(
         self,
-        ssh_client: SSHClient,
+        ssh_client: ExecutionClient,
         account: str | None = None,
         partition_map: dict[str, str] | None = None,
         default_partition: str | None = None,

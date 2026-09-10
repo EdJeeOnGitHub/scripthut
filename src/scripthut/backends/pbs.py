@@ -26,7 +26,7 @@ from scripthut.backends.utils import (
     parse_rss_to_bytes,
 )
 from scripthut.models import HPCJob, JobState
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 if TYPE_CHECKING:
     from scripthut.runs.models import TaskDefinition
@@ -233,7 +233,7 @@ def parse_qstat_queues(stdout: str) -> dict[str, dict]:
 class PBSBackend(JobBackend):
     """PBS/Torque job backend using SSH to run qstat/qsub/qdel."""
 
-    def __init__(self, ssh_client: SSHClient, default_queue: str | None = None) -> None:
+    def __init__(self, ssh_client: ExecutionClient, default_queue: str | None = None) -> None:
         """Initialize with an SSH client connected to the PBS head node."""
         self._ssh = ssh_client
         self._default_queue = default_queue

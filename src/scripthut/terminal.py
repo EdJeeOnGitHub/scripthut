@@ -1,15 +1,17 @@
 """Terminal session manager for web-based interactive terminals."""
 
 import asyncio
+import codecs
 import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient, InteractiveProcess
 
 logger = logging.getLogger(__name__)
 
@@ -74,85 +76,76 @@ class TerminalManager:
         return True
 
 
-async def handle_terminal_websocket(
-    websocket: WebSocket,
-    ssh_client: SSHClient,
-    command: str | None = None,
-) -> None:
-    """Run the bidirectional WebSocket <-> SSH PTY relay.
-
-    Protocol (JSON over text frames):
-      Client -> Server:
-        {"type": "input", "data": "..."}   -- terminal keystrokes
-        {"type": "resize", "cols": N, "rows": N}
-      Server -> Client:
-        {"type": "output", "data": "..."}  -- terminal output
-        {"type": "error", "message": "..."}
-        {"type": "exit", "code": N}
-    """
-    # Read init message with terminal dimensions
-    try:
-        init_msg = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except Exception:
-        await websocket.send_json({"type": "error", "message": "Expected init message"})
-        await websocket.close()
-        return
-
-    cols = init_msg.get("cols", 80)
-    rows = init_msg.get("rows", 24)
-
-    # Create SSH process with PTY
-    try:
-        process = await ssh_client.create_interactive_session(
-            command=command,
-            term_size=(cols, rows),
-        )
-    except Exception as e:
-        logger.error(f"Failed to create interactive session: {e}")
-        await websocket.send_json(
-            {"type": "error", "message": f"SSH session failed: {e}"}
-        )
-        await websocket.close()
-        return
-
+async def relay_terminal(websocket: WebSocket, process: InteractiveProcess) -> None:
+    """Relay an owned process and always close/reap it on either endpoint's exit."""
     async def ws_to_ssh() -> None:
-        """Forward WebSocket input to SSH stdin."""
-        try:
-            while True:
-                raw = await websocket.receive_text()
-                msg = json.loads(raw)
-                if msg["type"] == "input":
-                    process.stdin.write(msg["data"].encode())
-                elif msg["type"] == "resize":
-                    process.change_terminal_size(
-                        msg.get("cols", 80), msg.get("rows", 24)
-                    )
-        except (WebSocketDisconnect, Exception):
-            process.close()
+        while True:
+            msg = json.loads(await websocket.receive_text())
+            if msg["type"] == "input":
+                process.stdin.write(msg["data"].encode())
+            elif msg["type"] == "resize":
+                process.change_terminal_size(msg.get("cols", 80), msg.get("rows", 24))
 
     async def ssh_to_ws() -> None:
-        """Forward SSH stdout to WebSocket."""
-        try:
-            while not process.is_closing():
-                data = await process.stdout.read(4096)
-                if not data:
-                    break
-                text = data.decode("utf-8", errors="replace")
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            data = await process.stdout.read(4096)
+            if not data:
+                break
+            text = decoder.decode(data)
+            if text:
                 await websocket.send_json({"type": "output", "data": text})
-        except Exception:
-            pass
-        finally:
-            exit_code = process.returncode if process.returncode is not None else -1
-            try:
-                await websocket.send_json({"type": "exit", "code": exit_code})
-                await websocket.close()
-            except Exception:
-                pass
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            await websocket.send_json({"type": "output", "data": tail})
+        await process.wait_closed()
+        await websocket.send_json({
+            "type": "exit", "code": process.returncode if process.returncode is not None else -1,
+        })
 
-    # Run both directions concurrently; when either finishes, we're done
-    done, pending = await asyncio.wait(
-        [asyncio.create_task(ws_to_ssh()), asyncio.create_task(ssh_to_ws())],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        task.cancel()
+    tasks = [asyncio.create_task(ws_to_ssh()), asyncio.create_task(ssh_to_ws())]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        process.close()
+        await process.wait_closed()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+
+
+async def handle_terminal_websocket(
+    websocket: WebSocket,
+    ssh_client: ExecutionClient,
+    command: str | None = None,
+    *,
+    init_data: dict[str, Any] | None = None,
+) -> None:
+    """Initialize and relay a byte PTY over the existing terminal JSON protocol."""
+    try:
+        if init_data is None:
+            init_data = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+        if not isinstance(init_data, dict):
+            raise ValueError("Expected terminal initialization object")
+        process = await ssh_client.create_interactive_session(
+            command=command,
+            term_size=(init_data.get("cols", 80), init_data.get("rows", 24)),
+        )
+        await relay_terminal(websocket, process)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Terminal session failed: %s", exc)
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+            await websocket.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass

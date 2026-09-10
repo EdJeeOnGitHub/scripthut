@@ -1,6 +1,7 @@
 """Pydantic models for YAML configuration schema."""
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -64,6 +65,14 @@ class SSHConfig(BaseModel):
     host: str = Field(description="Hostname of the remote machine")
     port: int = Field(default=22, description="SSH port")
     user: str = Field(description="SSH username")
+    transport: Literal["asyncssh", "openssh"] = "asyncssh"
+    control_path: Path | None = Field(default=None, description="External OpenSSH control socket")
+    max_operations: int = Field(default=2, ge=1, description="Concurrent OpenSSH commands")
+    control_persist: str = Field(default="8h", description="Idle persistence for terminal fallback")
+    terminal_command: str | None = Field(
+        default=None,
+        description="Operator-provided terminal fallback text; never executed by server",
+    )
     key_path: Path = Field(
         default=Path("~/.ssh/id_rsa"),
         description="Path to SSH private key",
@@ -76,6 +85,35 @@ class SSHConfig(BaseModel):
         default=None,
         description="Path to known_hosts file (None to disable host key checking)",
     )
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> "SSHConfig":
+        if self.transport == "openssh":
+            if self.control_path is None or not self.control_path.expanduser().is_absolute():
+                raise ValueError("OpenSSH requires an absolute control_path (or ~/path)")
+            # OpenSSH expands tokens in -S even when no configuration is read.
+            socket_path = str(self.control_path.expanduser())
+            if any(c in socket_path for c in ("%", "$", "\n", "\r", "\0")):
+                raise ValueError(
+                    "control_path cannot contain expansion tokens or control characters"
+                )
+            if (
+                not self.host or self.host.startswith("-") or any(c.isspace() for c in self.host)
+            ):
+                raise ValueError("OpenSSH host must be a literal hostname or address")
+            if not self.user or any(c.isspace() for c in self.user):
+                raise ValueError("OpenSSH user must be a literal username")
+            if "\0" in self.host or "\0" in self.user:
+                raise ValueError("OpenSSH host/user cannot contain NUL")
+            if not 1 <= self.port <= 65535:
+                raise ValueError("OpenSSH port must be between 1 and 65535")
+            if not re.fullmatch(r"(?:[1-9][0-9]*[smhdw]?)+", self.control_persist):
+                raise ValueError("control_persist must be a positive OpenSSH duration, e.g. 8h")
+            if not self.terminal_command and self.known_hosts is None:
+                raise ValueError("OpenSSH requires known_hosts or an explicit terminal_command")
+        elif self.control_path is not None:
+            raise ValueError("control_path requires transport: openssh")
+        return self
 
     @property
     def key_path_resolved(self) -> Path:

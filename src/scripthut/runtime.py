@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import asyncssh
@@ -39,8 +39,10 @@ from scripthut.models import ConnectionStatus, HPCJob
 from scripthut.runs.manager import RunManager
 from scripthut.runs.storage import RunStorageManager
 from scripthut.runs.usage import UsageLog
-from scripthut.ssh.client import SSHClient
 from scripthut.ssh.command_log import CommandLog
+from scripthut.ssh.factory import create_ssh_client
+from scripthut.ssh.openssh import OpenSSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ class BackendState:
 
     name: str
     backend_type: str
-    ssh_client: SSHClient | None = None
+    ssh_client: ExecutionClient | None = None
     backend: JobBackend | None = None
     jobs: list[HPCJob] = field(default_factory=list)
     status: ConnectionStatus = field(
@@ -68,6 +70,30 @@ class BackendState:
     clone_dir: str = "~/scripthut-repos"
     _reconnect_after: float = 0.0
     _reconnect_delay: float = 0.0
+
+    @property
+    def socket_connection(self) -> dict[str, object] | None:
+        if isinstance(self.ssh_client, OpenSSHClient):
+            return self.ssh_client.connection_details()
+        return None
+
+
+async def check_backend_connection(bs: BackendState, *, force: bool = False) -> bool:
+    """Refresh transport health without losing cached scheduler and disk details."""
+    client = bs.ssh_client
+    if isinstance(client, OpenSSHClient):
+        health = await client.check_connection(force=force)
+        bs.status = replace(
+            bs.status, connected=health.state == "connected", error=health.error,
+        )
+    elif client is not None:
+        try:
+            await client.connect()
+            _, stderr, code = await client.run_command("true", timeout=15)
+            bs.status = replace(bs.status, connected=code == 0, error=stderr if code else None)
+        except Exception as exc:
+            bs.status = replace(bs.status, connected=False, error=str(exc))
+    return bs.status.connected
 
 
 @dataclass
@@ -185,7 +211,7 @@ def init_local_backend(
     backend_state = BackendState(
         name=backend_config.name,
         backend_type="local",
-        ssh_client=exec_client,  # type: ignore[arg-type] — duck-typed SSHClient
+        ssh_client=exec_client,
         backend=backend,
         status=ConnectionStatus(connected=True, host="localhost"),
         clone_dir=backend_config.clone_dir,
@@ -197,14 +223,7 @@ def init_local_backend(
 
 async def init_backend(backend_config: SlurmBackendConfig | PBSBackendConfig) -> BackendState:
     """Initialize an SSH-based backend connection (Slurm or PBS)."""
-    ssh_client = SSHClient(
-        host=backend_config.ssh.host,
-        user=backend_config.ssh.user,
-        key_path=backend_config.ssh.key_path_resolved,
-        port=backend_config.ssh.port,
-        cert_path=backend_config.ssh.cert_path_resolved,
-        known_hosts=backend_config.ssh.known_hosts_resolved,
-    )
+    ssh_client = create_ssh_client(backend_config.ssh)
 
     backend: JobBackend
     if isinstance(backend_config, PBSBackendConfig):
@@ -333,7 +352,7 @@ async def init_runtime(
     run_storage = RunStorageManager(config.settings.data_dir_resolved / "workflows")
     usage_log = UsageLog(config.settings.data_dir_resolved / "usage.jsonl")
 
-    ssh_clients: dict[str, SSHClient] = {
+    ssh_clients: dict[str, ExecutionClient] = {
         name: bs.ssh_client for name, bs in backends.items() if bs.ssh_client is not None
     }
     job_backends: dict[str, JobBackend] = {

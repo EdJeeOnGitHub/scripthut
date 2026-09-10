@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from scripthut.config_schema import (
@@ -145,6 +145,39 @@ def make_api_router(state: AppState) -> APIRouter:
                 "max_concurrent": getattr(cfg, "max_concurrent", None),
             })
         return {"backends": result}
+
+    def connection_summary(name: str) -> dict[str, Any]:
+        bs = state.backends.get(name)
+        if bs is None:
+            raise HTTPException(status_code=404, detail="Backend not found")
+        if bs.socket_connection is not None:
+            return {"backend": name, **bs.socket_connection}
+        return {
+            "backend": name, "state": "connected" if bs.status.connected else "disconnected",
+            "last_successful_check": bs.status.last_poll, "error": bs.status.error,
+        }
+
+    @router.get("/backends/{name}/connection")
+    async def backend_connection(name: str) -> dict[str, Any]:
+        return connection_summary(name)
+
+    @router.post("/backends/{name}/connection/check")
+    async def check_connection(name: str, request: Request) -> dict[str, Any]:
+        from scripthut.runtime import check_backend_connection
+
+        origin = request.headers.get("origin")
+        if (origin is not None and origin != str(request.base_url).rstrip("/")) or (
+            request.headers.get("sec-fetch-site") == "cross-site"
+        ):
+            raise HTTPException(status_code=403, detail="Cross-origin connection check rejected")
+        bs = state.backends.get(name)
+        if bs is None:
+            raise HTTPException(status_code=404, detail="Backend not found")
+        if bs.ssh_client is None:
+            raise HTTPException(status_code=400, detail="Backend has no SSH connection")
+        await check_backend_connection(bs, force=True)
+        state.notify_poll()
+        return connection_summary(name)
 
     def _source_summary(src: Any) -> dict[str, Any]:
         """Compact dict for a GitSourceConfig or PathSourceConfig.

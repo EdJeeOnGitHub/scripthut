@@ -564,3 +564,84 @@ SSH settings are shared by both Slurm and PBS backends.
 | `key_path` | path | `~/.ssh/id_rsa` | Path to SSH private key. Supports `~` expansion. |
 | `cert_path` | path | `null` | Path to SSH certificate for certificate-based authentication. |
 | `known_hosts` | path | `null` | Path to `known_hosts` file. If `null`, host key checking is disabled. |
+
+### External OpenSSH sockets
+
+`transport: openssh` lets Slurm/PBS use an already authenticated OpenSSH control
+master on a POSIX host. AsyncSSH remains the default. The controller never starts
+or stops the master, and socket failure cannot trigger a fresh SSH connection.
+This is useful for clusters requiring interactive authentication.
+
+**Development status:** the transport is implemented, but remote submissions
+must wait for the disconnection/reconciliation work in Phase 3 of the
+[implementation roadmap](../design/openssh-socket-implementation.md). Phase 2
+provides transport and health checks; it does not yet make scheduler recovery
+safe after an uncertain submission response.
+
+```yaml
+backends:
+  - name: cluster
+    type: slurm
+    ssh:
+      transport: openssh
+      host: login.cluster.example
+      user: researcher
+      control_path: /run/scripthut-ssh/cluster.sock
+      known_hosts: ~/.ssh/known_hosts
+      max_operations: 2
+      control_persist: 8h
+```
+
+| Field | Default | Meaning in OpenSSH mode |
+| --- | --- | --- |
+| `transport` | `asyncssh` | Select `openssh` to reuse an external master. |
+| `control_path` | Required | Absolute socket path visible to the controller; `~` expands locally. OpenSSH expansion tokens are not accepted. |
+| `max_operations` | `2` | Concurrent automated command processes per backend. Interactive terminals use separate sessions. |
+| `control_persist` | `8h` | Idle persistence used in the generated terminal fallback command; does not change an existing master or predict expiry. |
+| `terminal_command` | Generated | Optional copyable operator-provided command. Displayed only; the application never executes it. |
+| `known_hosts` | Required unless `terminal_command` is supplied | Used by the generated fallback command for strict host-key verification. Authentication and verification for an existing socket belong to its owner. |
+
+Install the OpenSSH client on the controller. Establish the master on the host
+with verified host keys and a private socket directory owned by the controller's
+UID (mode 0700). The selected master must authenticate the configured host/user.
+Never share a socket among unrelated backend destinations.
+
+For example, on the host managing the socket:
+
+```sh
+mkdir -p ~/.local/run/scripthut-ssh
+chmod 700 ~/.local/run/scripthut-ssh
+ssh -M -N -f -S ~/.local/run/scripthut-ssh/cluster.sock \
+  -o ControlPersist=8h -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes researcher@login.cluster.example
+```
+
+For a container, mount the **directory**, not an individual socket, and match
+UID/GID. Set `control_path` to the container path. Supply `terminal_command` when
+the fallback must use host-side socket or known-hosts paths that differ from the
+controller paths. Keep passwords, keys, and sockets outside the repository.
+Existing masters survive controller restart; host restart requires manual login.
+
+Backend cards show socket presence, the last master response, last successful
+remote execution, first-observed connection time, and errors. **Check connection**
+runs a control check and remote `true`, without replacing the master. Checks are
+coalesced, successful results cached for 30 seconds, and failures backed off from
+30 seconds to five minutes. An explicit check bypasses the delay once and joins
+an existing check. Socket existence or a control response alone is not proof of
+a usable remote session. A terminal fallback is shown when disconnected; browser
+authentication is a later phase.
+
+The JSON API exposes cached status at
+`GET /api/v1/backends/{name}/connection` and an explicit probe at
+`POST /api/v1/backends/{name}/connection/check`. Status includes `state`,
+`socket_exists`, `master_responsive`, `last_successful_check`,
+`first_observed_at`, `error`, and the configured socket/fallback details.
+State is `connected`, `disconnected`, or `connection_failed` in external mode.
+Failed checks preserve cached job/disk data. Cross-origin browser checks are
+rejected; CLI requests without an Origin header remain supported.
+
+Automated calls ignore SSH config files and disable direct fallback using a
+failing proxy command. They never retry a command automatically. SSH exit 255
+is conservatively reported as a transport error, even though a remote command
+can itself return 255. Timeouts/cancellation close and reap the controller's
+child process; that does not prove a remote command had no side effects.

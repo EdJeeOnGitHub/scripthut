@@ -34,7 +34,7 @@ from scripthut.runs.models import (
     TaskOutput,
 )
 from scripthut.sources.git import is_safe_branch_name
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 if TYPE_CHECKING:
     from scripthut.runs.storage import RunStorageManager
@@ -130,7 +130,7 @@ class RunManager:
     def __init__(
         self,
         config: ScriptHutConfig,
-        backends: dict[str, SSHClient],
+        backends: dict[str, ExecutionClient],
         storage: RunStorageManager | None = None,
         job_backends: dict[str, JobBackend] | None = None,
     ) -> None:
@@ -493,11 +493,11 @@ class RunManager:
         # and non-cacheable tasks.
         await self._maybe_store_cache(run, item)
 
-    def get_ssh_client(self, backend_name: str) -> SSHClient | None:
+    def get_ssh_client(self, backend_name: str) -> ExecutionClient | None:
         """Get SSH client for a backend."""
         return self.backends.get(backend_name)
 
-    async def _get_git_root(self, ssh_client: SSHClient, working_dir: str) -> str:
+    async def _get_git_root(self, ssh_client: ExecutionClient, working_dir: str) -> str:
         """Detect the git repository root for a working directory on the backend."""
         stdout, stderr, exit_code = await ssh_client.run_command(
             f"cd {working_dir} && git rev-parse --show-toplevel"
@@ -542,7 +542,7 @@ class RunManager:
         return f'export GIT_SSH_COMMAND="ssh -i {remote_key_path} {opts}"; '
 
     async def _upload_deploy_key(
-        self, ssh_client: SSHClient, local_key_path: Path
+        self, ssh_client: ExecutionClient, local_key_path: Path
     ) -> str:
         """Upload a local deploy key to a temp file on the backend.
 
@@ -569,14 +569,14 @@ class RunManager:
         return stdout.strip()
 
     async def _cleanup_deploy_key(
-        self, ssh_client: SSHClient, remote_key_path: str
+        self, ssh_client: ExecutionClient, remote_key_path: str
     ) -> None:
         """Remove a temporary deploy key from the backend."""
         await ssh_client.run_command(f"rm -f {remote_key_path}")
 
     async def _clone_git_repo(
         self,
-        ssh_client: SSHClient,
+        ssh_client: ExecutionClient,
         *,
         repo: str,
         branch: str,
@@ -680,7 +680,7 @@ class RunManager:
         workflow_name: str,
         backend_name: str,
         max_concurrent: int | None,
-        ssh_client: SSHClient | None,
+        ssh_client: ExecutionClient | None,
         *,
         git_repo: str | None = None,
         git_branch: str | None = None,
@@ -959,7 +959,7 @@ class RunManager:
         return [TaskDefinition.from_dict(t) for t in tasks_data]
 
     async def _clone_source_repo(
-        self, ssh_client: SSHClient, source: GitSourceConfig,
+        self, ssh_client: ExecutionClient, source: GitSourceConfig,
     ) -> tuple[str, str]:
         """Clone a git source's repo on the backend."""
         return await self._clone_git_repo(
@@ -972,7 +972,7 @@ class RunManager:
         )
 
     async def _clone_agent_workspace(
-        self, ssh_client: SSHClient, source: GitSourceConfig, *, full_history: bool,
+        self, ssh_client: ExecutionClient, source: GitSourceConfig, *, full_history: bool,
     ) -> tuple[str, str]:
         """Clone a *fresh, writable, unique* workspace for a coding-agent run.
 
@@ -1050,7 +1050,7 @@ class RunManager:
         source: GitSourceConfig | PathSourceConfig,
         *,
         commit_hash: str | None = None,
-        ssh_client: SSHClient | None = None,
+        ssh_client: ExecutionClient | None = None,
     ) -> ScriptHutConfig | None:
         """Delegate to :func:`load_source_project_config` with this config."""
         return await load_source_project_config(
@@ -1486,7 +1486,7 @@ class RunManager:
         task: TaskDefinition,
         merged_env: dict[str, str],
         commit_hash: str | None,
-        ssh_client: SSHClient | None,
+        ssh_client: ExecutionClient | None,
         input_hashes: dict[str, str] | None = None,
     ) -> tuple[dict, dict | None]:
         """Read-only cache probe for one task: compute the key, look it up.
@@ -1661,7 +1661,7 @@ class RunManager:
         run: Run,
         item: RunItem,
         merged_env: dict[str, str],
-        ssh_client: SSHClient | None,
+        ssh_client: ExecutionClient | None,
         input_hashes: dict[str, str] | None = None,
     ) -> bool:
         """Restore a prior run's artifacts for this task if the cache matches.
@@ -2385,7 +2385,7 @@ async def load_source_project_config(
     source: GitSourceConfig | PathSourceConfig,
     *,
     commit_hash: str | None = None,
-    ssh_client: SSHClient | None = None,
+    ssh_client: ExecutionClient | None = None,
 ) -> ScriptHutConfig | None:
     """Read ``<repo>/scripthut.yaml`` from a source as project-local config.
 

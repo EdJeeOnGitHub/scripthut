@@ -30,7 +30,7 @@ from enum import Enum
 
 from scripthut.backends.utils import shell_quote_path
 from scripthut.config_schema import Stack
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class StackManager:
         return shell_quote_path(path)
 
     async def check(
-        self, stack: Stack, backend_name: str, ssh: SSHClient
+        self, stack: Stack, backend_name: str, ssh: ExecutionClient
     ) -> StackStatus:
         """Report the current state of ``stack`` on this backend."""
         h = compute_stack_hash(stack)
@@ -189,7 +189,7 @@ class StackManager:
         self,
         stack: Stack,
         backend_name: str,
-        ssh: SSHClient,
+        ssh: ExecutionClient,
         rebuild: bool = False,
         scheduler: str | None = None,
     ) -> StackStatus:
@@ -293,7 +293,7 @@ class StackManager:
         return await self.check(stack, backend_name, ssh)
 
     async def delete(
-        self, stack: Stack, backend_name: str, ssh: SSHClient
+        self, stack: Stack, backend_name: str, ssh: ExecutionClient
     ) -> None:
         """Remove every cached build of this stack on this backend.
 

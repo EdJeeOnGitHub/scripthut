@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from scripthut.runs.manager import RunManager
     from scripthut.runs.models import Run
     from scripthut.runs.storage import RunStorageManager
-    from scripthut.ssh.client import SSHClient
+    from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ class DiskScanService:
         self,
         *,
         spec: ScanSpec,
-        ssh: SSHClient,
+        ssh: ExecutionClient,
         runs: list[Run],
         current_stack_hashes: dict[str, set[str]] | None = None,
         stack_texts: dict[str, str] | None = None,
@@ -241,7 +241,7 @@ class DiskScanService:
         *,
         plan: CleanupPlan,
         spec: ScanSpec,
-        ssh: SSHClient,
+        ssh: ExecutionClient,
         run_manager: RunManager | None,
         run_storage: RunStorageManager | None,
         config: ScriptHutConfig,
@@ -283,7 +283,7 @@ AGENT_CHECK_TIMEOUT = 120
 DELETE_TIMEOUT = 1800  # rm -rf on shared filesystems can be very slow
 
 
-async def execute_cleanup(plan: CleanupPlan, ssh: SSHClient) -> CleanupReport:
+async def execute_cleanup(plan: CleanupPlan, ssh: ExecutionClient) -> CleanupReport:
     """Run a cleanup plan over SSH: agent git checks, then deletion.
 
     Never marks an entry deleted without a positive ``OK`` line from
@@ -414,7 +414,7 @@ def collect_stack_texts(
 
 
 async def gather_project_stacks(
-    config: ScriptHutConfig, backend_name: str, *, ssh: SSHClient | None = None,
+    config: ScriptHutConfig, backend_name: str, *, ssh: ExecutionClient | None = None,
 ) -> tuple[list[Stack], list[str]]:
     """Stacks declared by each source's project ``scripthut.yaml``.
 
@@ -435,7 +435,7 @@ async def gather_project_stacks(
         if isinstance(source, PathSourceConfig):
             if ssh is None or source.backend != backend_name:
                 continue
-            source_ssh: SSHClient | None = ssh
+            source_ssh: ExecutionClient | None = ssh
         else:
             source_ssh = None
         try:
@@ -463,7 +463,7 @@ async def start_scan_for_backend(
     config: ScriptHutConfig,
     backend_name: str,
     clone_dir: str,
-    ssh: SSHClient,
+    ssh: ExecutionClient,
     run_manager: RunManager | None,
     run_storage: RunStorageManager | None,
 ) -> bool:
@@ -504,7 +504,7 @@ async def plan_cleanup_for_backend(
     run_storage: RunStorageManager | None,
     paths: list[str] | None,
     allow_referenced: frozenset[str] = frozenset(),
-    ssh: SSHClient | None = None,
+    ssh: ExecutionClient | None = None,
 ) -> CleanupPlan | None:
     """Plan a cleanup against the cached scan and *current* runs.
 
@@ -546,7 +546,7 @@ async def start_clean_for_backend(
     config: ScriptHutConfig,
     backend_name: str,
     clone_dir: str,
-    ssh: SSHClient,
+    ssh: ExecutionClient,
     run_manager: RunManager | None,
     run_storage: RunStorageManager | None,
     paths: list[str] | None,

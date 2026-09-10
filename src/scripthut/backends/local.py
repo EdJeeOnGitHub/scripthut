@@ -29,6 +29,7 @@ the same property sacct gives the Slurm backend.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ from scripthut.models import HPCJob, JobState
 
 if TYPE_CHECKING:
     from scripthut.runs.models import TaskDefinition
+    from scripthut.ssh.transport import InteractiveProcess
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,7 @@ class LocalExecClient:
     """
 
     def __init__(self) -> None:
+        self.user = getpass.getuser()
         # CommandLog.append when wired by runtime (same hook as SSHClient).
         self.on_command: Callable[..., None] | None = None
 
@@ -109,6 +112,18 @@ class LocalExecClient:
 
     async def disconnect(self) -> None:
         return None
+
+    async def create_interactive_session(
+        self, command: str | None = None, term_type: str = "xterm-256color",
+        term_size: tuple[int, int] = (80, 24),
+    ) -> InteractiveProcess:
+        raise RuntimeError("Local executor does not support interactive terminals")
+
+    async def __aenter__(self) -> LocalExecClient:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        await self.disconnect()
 
     def _log(
         self, command: str, start: float,

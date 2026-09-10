@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from scripthut.config_schema import CacheConfig
-    from scripthut.ssh.client import SSHClient
+    from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class CacheManager:
     """Computes cache keys and moves artifacts between a backend and the store.
 
     Stateless aside from its config; every method that touches files takes an
-    :class:`SSHClient` so the same manager serves every backend.
+    :class:`ExecutionClient` so the same manager serves every backend.
     """
 
     def __init__(self, config: CacheConfig) -> None:
@@ -154,7 +154,7 @@ class CacheManager:
 
     async def hash_inputs(
         self,
-        ssh: SSHClient,
+        ssh: ExecutionClient,
         working_dir: str,
         inputs: list[str],
     ) -> dict[str, str] | None:
@@ -231,7 +231,7 @@ class CacheManager:
     # --- Action-cache lookup ----------------------------------------------
 
     async def lookup(
-        self, ssh: SSHClient, key: str
+        self, ssh: ExecutionClient, key: str
     ) -> dict[str, Any] | None:
         """Fetch and parse the manifest at ``ac/<key>.json``, or ``None`` on miss."""
         uri = self._uri("ac", f"{key}.json")
@@ -256,7 +256,7 @@ class CacheManager:
     # --- Restore ----------------------------------------------------------
 
     async def restore(
-        self, ssh: SSHClient, working_dir: str, manifest: dict[str, Any]
+        self, ssh: ExecutionClient, working_dir: str, manifest: dict[str, Any]
     ) -> bool:
         """Download the manifest's blob and extract it into ``working_dir``.
 
@@ -292,7 +292,7 @@ class CacheManager:
 
     async def store(
         self,
-        ssh: SSHClient,
+        ssh: ExecutionClient,
         working_dir: str,
         *,
         key: str,

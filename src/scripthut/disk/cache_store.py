@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from scripthut.config_schema import CacheConfig
-from scripthut.ssh.client import SSHClient
+from scripthut.ssh.transport import ExecutionClient
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ async def scan_cache_store(
     cache: CacheConfig | None,
     *,
     backend_name: str,
-    ssh: SSHClient,
+    ssh: ExecutionClient,
 ) -> CacheStoreStatus:
     """Summarize the ``ac/`` and ``cas/`` prefixes of the configured store.
 

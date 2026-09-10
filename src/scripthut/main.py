@@ -9,14 +9,14 @@ import re
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
 import asyncssh
 import uvicorn
-from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Form, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
@@ -52,11 +52,12 @@ from scripthut.runs.usage import UsageLog, merged_records, window_start
 from scripthut.runtime import (
     BackendState,
     Runtime,
+    check_backend_connection,
     init_runtime,
     shutdown_runtime,
 )
 from scripthut.sources.git import GitSourceManager, SourceStatus, SourceWorkflow
-from scripthut.terminal import TerminalManager
+from scripthut.terminal import TerminalManager, handle_terminal_websocket
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,6 +163,10 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
     if backend_state.backend is None:
         return
 
+    if backend_state.socket_connection is not None:
+        if not await check_backend_connection(backend_state):
+            return
+
     # Attempt to reconnect if the SSH connection is down (SSH-based backends only)
     if backend_state.ssh_client is not None and not backend_state.ssh_client.is_connected:
         # Skip if still in backoff period
@@ -182,18 +187,14 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             logger.warning(
                 f"Auth failed for '{backend_state.name}', next retry in {delay:.0f}s: {e}"
             )
-            backend_state.status = ConnectionStatus(
-                connected=False,
-                host=backend_state.status.host,
-                last_poll=backend_state.status.last_poll,
+            backend_state.status = replace(
+                backend_state.status, connected=False,
                 error=f"{e} (retry in {delay:.0f}s)",
             )
             return
         except Exception as e:
-            backend_state.status = ConnectionStatus(
-                connected=False,
-                host=backend_state.status.host,
-                last_poll=backend_state.status.last_poll,
+            backend_state.status = replace(
+                backend_state.status, connected=False,
                 error=str(e),
             )
             return
@@ -569,10 +570,8 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
     except Exception as e:
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         logger.error(f"Job polling failed for '{backend_state.name}': {e}")
-        backend_state.status = ConnectionStatus(
-            connected=False,
-            host=backend_state.status.host,
-            last_poll=backend_state.status.last_poll,
+        backend_state.status = replace(
+            backend_state.status, connected=False,
             last_poll_duration_ms=duration_ms,
             error=str(e),
         )
@@ -3491,58 +3490,9 @@ async def terminal_ws(websocket: WebSocket, backend_name: str) -> None:
     logger.info(f"Terminal session {session.id} ({session_type}) for backend '{backend_name}'")
 
     try:
-        # Re-inject the init message since handle_terminal_websocket reads it
-        # We put the data back by overriding the first receive
-        # Actually, handle_terminal_websocket expects to read init itself,
-        # so we need to send a synthetic init. Instead, let's restructure:
-        # We already consumed the init, so create the process directly here
-        # and run the relay ourselves.
-        cols = init_data.get("cols", 80)
-        rows = init_data.get("rows", 24)
-
-        process = await backend_state.ssh_client.create_interactive_session(
-            command=command,
-            term_size=(cols, rows),
+        await handle_terminal_websocket(
+            websocket, backend_state.ssh_client, command=command, init_data=init_data,
         )
-
-        async def ws_to_ssh() -> None:
-            try:
-                while True:
-                    raw = await websocket.receive_text()
-                    msg = json.loads(raw)
-                    if msg["type"] == "input":
-                        process.stdin.write(msg["data"].encode())
-                    elif msg["type"] == "resize":
-                        process.change_terminal_size(
-                            msg.get("cols", 80), msg.get("rows", 24)
-                        )
-            except (WebSocketDisconnect, Exception):
-                process.close()
-
-        async def ssh_to_ws() -> None:
-            try:
-                while not process.is_closing():
-                    data = await process.stdout.read(4096)
-                    if not data:
-                        break
-                    text = data.decode("utf-8", errors="replace")
-                    await websocket.send_json({"type": "output", "data": text})
-            except Exception:
-                pass
-            finally:
-                exit_code = process.returncode if process.returncode is not None else -1
-                try:
-                    await websocket.send_json({"type": "exit", "code": exit_code})
-                    await websocket.close()
-                except Exception:
-                    pass
-
-        done, pending = await asyncio.wait(
-            [asyncio.create_task(ws_to_ssh()), asyncio.create_task(ssh_to_ws())],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
 
     except Exception as e:
         logger.error(f"Terminal session {session.id} failed: {e}")
