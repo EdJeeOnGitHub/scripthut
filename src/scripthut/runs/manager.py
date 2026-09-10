@@ -133,8 +133,10 @@ class RunManager:
         backends: dict[str, SSHClient],
         storage: RunStorageManager | None = None,
         job_backends: dict[str, JobBackend] | None = None,
+        backend_users: dict[str, str | None] | None = None,
     ) -> None:
         """Initialize with config, SSH backends, and optional persistent storage."""
+        self.backend_users = backend_users if backend_users is not None else {}
         self.config = config
         self.backends = backends
         self.runs: dict[str, Run] = {}
@@ -329,7 +331,9 @@ class RunManager:
                     )
                     return
 
-        new_items = [RunItem(task=t) for t in new_tasks]
+        new_items = [
+            RunItem(task=t, user=self.backend_users.get(run.backend_name)) for t in new_tasks
+        ]
         run.items.extend(new_items)
         self._persist_run(run)
 
@@ -726,7 +730,7 @@ class RunManager:
             workflow_name=workflow_name,
             backend_name=backend_name,
             created_at=datetime.now(timezone.utc),
-            items=[RunItem(task=task) for task in tasks],
+            items=[RunItem(task=task, user=self.backend_users.get(backend_name)) for task in tasks],
             max_concurrent=max_concurrent,
             account=account,
             login_shell=login_shell,

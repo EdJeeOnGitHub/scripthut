@@ -35,6 +35,7 @@ from scripthut.config_schema import (
     ScriptHutConfig,
     SlurmBackendConfig,
 )
+from scripthut.identity import backend_user
 from scripthut.models import ConnectionStatus, HPCJob
 from scripthut.runs.manager import RunManager
 from scripthut.runs.storage import RunStorageManager
@@ -57,6 +58,7 @@ class BackendState:
 
     name: str
     backend_type: str
+    current_user: str | None = None
     ssh_client: SSHClient | None = None
     backend: JobBackend | None = None
     jobs: list[HPCJob] = field(default_factory=list)
@@ -185,6 +187,7 @@ def init_local_backend(
     backend_state = BackendState(
         name=backend_config.name,
         backend_type="local",
+        current_user=backend.current_user,
         ssh_client=exec_client,  # type: ignore[arg-type] — duck-typed SSHClient
         backend=backend,
         status=ConnectionStatus(connected=True, host="localhost"),
@@ -223,6 +226,7 @@ async def init_backend(backend_config: SlurmBackendConfig | PBSBackendConfig) ->
     backend_state = BackendState(
         name=backend_config.name,
         backend_type=backend_type,
+        current_user=backend_user(backend_config),
         ssh_client=ssh_client,
         backend=backend,
         status=ConnectionStatus(connected=False, host=backend_config.ssh.host),
@@ -342,6 +346,7 @@ async def init_runtime(
     }
     run_manager = RunManager(
         config, ssh_clients, storage=run_storage, job_backends=job_backends,
+        backend_users={name: bs.current_user for name, bs in backends.items()},
     )
     logger.info(
         f"Initialized run manager with {len(config.sources)} sources"

@@ -81,7 +81,7 @@ settings:
   server_port: 8000
   data_dir: ~/.cache/scripthut
   sources_cache_dir: ~/.cache/scripthut/sources
-  filter_user: your_username
+  my_jobs_only: true
 ```
 
 | Field | Type | Default | Description |
@@ -91,7 +91,7 @@ settings:
 | `server_port` | integer | `8000` | Port to bind the web server to. |
 | `data_dir` | path | `~/.cache/scripthut` | Base directory for all stored data (run history, logs, `usage.jsonl`). |
 | `sources_cache_dir` | path | `<data_dir>/sources` | Directory to cache cloned repositories. |
-| `filter_user` | string | `null` | Default username for the "My Jobs" filter in the UI. If `null`, all users' jobs are shown. |
+| `my_jobs_only` | boolean | `true` | Show each backend's own jobs. SSH uses its login user; local uses the process owner. Cloud visibility is unchanged. Set `false` for all users. |
 | `cli_server` | string | `null` | Default URL of a running scripthut server for the CLI. Overridden by `--server` and `SCRIPTHUT_SERVER`. See [CLI](../cli.md). |
 | `cli_autostart` | `ask` / `always` / `never` | `"ask"` | What the CLI does when no server is configured and no local daemon is running: prompt on a TTY, start one without asking, or fail with guidance. See [CLI § Local daemon](../cli.md#local-daemon). |
 
@@ -169,5 +169,17 @@ settings:
   server_host: 127.0.0.1
   server_port: 8000
   data_dir: ~/.cache/scripthut
-  filter_user: researcher
+  my_jobs_only: true
 ```
+
+### Backend identities and the job view
+
+“My Jobs” uses each SSH backend's `ssh.user` and the effective process owner for
+local execution. Cloud backends have no scheduler username and keep their existing
+visibility in either view. The view toggle never changes job ownership or quotas.
+`GET /filter/status` returns `enabled` and `users`, a mapping from backend names to
+usernames (or `null` for cloud backends).
+
+The legacy `settings.filter_user` is deprecated: a nonempty value selects My Jobs,
+while explicit `null` selects All Users. The old username is no longer used to
+select another person's jobs. An explicit `my_jobs_only` takes precedence.

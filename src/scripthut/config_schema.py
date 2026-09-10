@@ -1,6 +1,7 @@
 """Pydantic models for YAML configuration schema."""
 
 import os
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -715,10 +716,22 @@ class GlobalSettings(BaseModel):
         default=None,
         description="Directory to cache cloned repositories (default: <data_dir>/sources)",
     )
-    filter_user: str | None = Field(
-        default=None,
-        description="Default username to filter jobs by (None for all users)",
-    )
+    my_jobs_only: bool = Field(default=True, description="Show each backend's own jobs by default")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_filter_user(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "filter_user" in data:
+            warnings.warn(
+                "settings.filter_user is deprecated; use my_jobs_only. "
+                "My Jobs now uses each backend's identity, not the legacy username.",
+                DeprecationWarning, stacklevel=2,
+            )
+            data = dict(data)
+            legacy = data.pop("filter_user")
+            data.setdefault("my_jobs_only", bool(legacy))
+        return data
+
     cli_server: str | None = Field(
         default=None,
         description=(

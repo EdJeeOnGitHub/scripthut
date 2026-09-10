@@ -420,13 +420,14 @@ class RunStorageManager:
         return False
 
     def reconcile_external_jobs(
-        self, backend_name: str, active_job_ids: set[str]
+        self, backend_name: str, active_job_ids: set[str], *, user: str | None = None
     ) -> int:
         """Mark non-terminal external jobs as completed if no longer in scheduler queue.
 
         Called after each poll cycle to reconcile stored external jobs against
         the current set of live job IDs.  Returns the number of items
-        whose status was updated.
+        whose status was updated. A filtered poll only reconciles matching owners;
+        missing or other owners are outside its observation scope.
         """
         NON_TERMINAL = {RunItemStatus.PENDING, RunItemStatus.SUBMITTED, RunItemStatus.RUNNING}
         reconciled = 0
@@ -448,7 +449,8 @@ class RunStorageManager:
         for run in runs_to_check.values():
             for item in run.items:
                 if (
-                    item.status in NON_TERMINAL
+                    (user is None or item.user == user)
+                    and item.status in NON_TERMINAL
                     and item.job_id
                     and item.job_id not in active_job_ids
                 ):

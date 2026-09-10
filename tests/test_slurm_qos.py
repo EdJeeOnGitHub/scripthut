@@ -19,7 +19,7 @@ def test_invalid_qos(qos):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("qos", [None, "buyin"])
 async def test_runtime_emits_qos(monkeypatch, qos):
-    monkeypatch.setattr("scripthut.runtime.create_ssh_client", lambda cfg: AsyncMock())
+    monkeypatch.setattr("scripthut.runtime.SSHClient", lambda **kwargs: AsyncMock())
     cfg = SlurmBackendConfig(name="q", ssh=SSHConfig(host="q", user="u"),
                              account="kellogg", default_partition="kellogg", qos=qos)
     bs = await init_backend(cfg)

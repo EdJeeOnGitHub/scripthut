@@ -30,9 +30,15 @@ from scripthut.config_schema import (
     ScriptHutConfig,
 )
 from scripthut.disk.service import DiskScanService
+from scripthut.identity import JobFilter
 from scripthut.models import ConnectionStatus, HPCJob, JobState
 from scripthut.notifications import NotificationHub
 from scripthut.runs import Run, RunManager
+from scripthut.runs.activity import (
+    ACTIVITY_WINDOW_DAYS,
+    build_activity_grid,
+    build_hourly_usage,
+)
 from scripthut.runs.manager import (
     DISAPPEARED_BEFORE_RUNNING_MARKER,
     SCHEDULER_NO_RECORD_MARKER,
@@ -40,11 +46,6 @@ from scripthut.runs.manager import (
     SETTLING_UNCONFIRMED_MARKER,
     SUBMIT_TO_FAIL_GRACE_SECONDS,
     SUBMITTED_NO_RECORD_TIMEOUT_SECONDS,
-)
-from scripthut.runs.activity import (
-    ACTIVITY_WINDOW_DAYS,
-    build_activity_grid,
-    build_hourly_usage,
 )
 from scripthut.runs.models import RunItemStatus, RunStatus
 from scripthut.runs.storage import RunStorageManager
@@ -84,8 +85,7 @@ class AppState:
     pricing_service: Any = None  # Optional PricingService instance
     debug_job_ids: set[str] = field(default_factory=set)  # job IDs submitted via interactive debug
     disabled_sources: set[str] = field(default_factory=set)  # Source names toggled off
-    filter_enabled: bool = False
-    filter_user: str | None = None
+    filter_enabled: bool = True
     live_view: bool = True
     # Startup readiness: a phase string ("connecting backends", ...) while
     # background initialization runs; None once the server is fully ready.
@@ -155,6 +155,12 @@ notification_hub = NotificationHub()
 _config_path: Path | None = None
 
 
+def _job_filter() -> JobFilter:
+    return JobFilter(
+        {name: bs.current_user for name, bs in state.backends.items()}, state.filter_enabled,
+    )
+
+
 async def poll_backend(backend_state: BackendState, filter_user: str | None = None) -> None:
     """Poll jobs for a single backend."""
     if not backend_state.enabled:
@@ -201,7 +207,7 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
     start_time = time.perf_counter()
     try:
         jobs = await backend_state.backend.get_jobs(user=filter_user)
-        cluster_info = await backend_state.backend.get_cluster_info(user=filter_user)
+        cluster_info = await backend_state.backend.get_cluster_info(user=backend_state.current_user)
         disk_info = await backend_state.backend.get_disk_info(backend_state.clone_dir)
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         backend_state.jobs = jobs
@@ -282,7 +288,7 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             logger.info(f"Fetching stats for {len(sacct_ids)} jobs on '{backend_state.name}': {sacct_ids}")
             try:
                 job_stats = await backend_state.backend.get_job_stats(
-                    sacct_ids, user=filter_user,
+                    sacct_ids, user=None,
                 )
                 logger.info(f"Got stats for {len(job_stats)}/{len(sacct_ids)} jobs on '{backend_state.name}'")
             except Exception as e:
@@ -514,6 +520,8 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
         if state.run_manager and state.run_storage:
             known_slurm_ids: set[str] = set()
             for run in state.run_manager.runs.values():
+                if run.backend_name != backend_state.name:
+                    continue
                 for item in run.items:
                     if item.job_id:
                         known_slurm_ids.add(item.job_id)
@@ -559,7 +567,7 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             # Reconcile stale external jobs no longer in squeue
             active_ids = {j.job_id for j in jobs}
             reconciled = state.run_storage.reconcile_external_jobs(
-                backend_state.name, active_ids
+                backend_state.name, active_ids, user=filter_user
             )
             if reconciled:
                 logger.info(
@@ -588,16 +596,19 @@ async def poll_jobs() -> None:
     poll_count = 0
 
     while not state._shutdown_event.is_set():
-        filter_user = state.filter_user if state.filter_enabled else None
+        job_filter = _job_filter()
 
         tasks = [
-            poll_backend(backend_state, filter_user=filter_user)
+            poll_backend(backend_state, filter_user=job_filter.query_user(backend_state.name))
             for backend_state in state.backends.values()
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
             total_jobs = sum(len(c.jobs) for c in state.backends.values())
-            logger.info(f"Polled {total_jobs} jobs from {len(tasks)} backends (filter_user={filter_user})")
+            logger.info(
+                "Polled %s jobs from %s backends (my_jobs_only=%s)",
+                total_jobs, len(tasks), state.filter_enabled,
+            )
 
         # Update run statuses based on polled jobs
         if state.run_manager and state.run_manager.get_active_runs():
@@ -672,8 +683,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Loaded configuration with {len(config.backends)} backends, {len(config.sources)} sources")
 
     # Initialize filter settings
-    state.filter_user = config.settings.filter_user
-    state.filter_enabled = config.settings.filter_user is not None
+    state.filter_enabled = config.settings.my_jobs_only
 
     # Initialize source manager
     state.source_manager = GitSourceManager(config.settings.sources_cache_dir_resolved)
@@ -959,8 +969,7 @@ def reload_runtime_config(new_config: ScriptHutConfig) -> ReloadReport:
     if state.run_manager is not None:
         state.run_manager.config = new_config
 
-    state.filter_user = new_config.settings.filter_user
-    state.filter_enabled = new_config.settings.filter_user is not None
+    state.filter_enabled = new_config.settings.my_jobs_only
 
     report.reloaded.extend(["env rules", "settings"])
     report.counts["env_rules"] = len(new_config.env)
@@ -1249,8 +1258,8 @@ def _render_markdown_for_outputs(
     write inside ``$SCRIPTHUT_TASK_SUMMARY`` ends up in this pipeline.
     """
     try:
-        import markdown
         import bleach
+        import markdown
     except ImportError:
         # Degrade gracefully: escape and wrap in <pre> so the content
         # is still visible. Production installs should always have
@@ -1289,13 +1298,13 @@ def _render_markdown_for_outputs(
     )
 
 
-def _get_job_nodes() -> dict[str, str]:
-    """Build a job_id -> node mapping from live scheduler data."""
-    result: dict[str, str] = {}
+def _get_job_nodes() -> dict[tuple[str, str], str]:
+    """Build a (backend, job_id) -> node mapping from live scheduler data."""
+    result: dict[tuple[str, str], str] = {}
     for bs in state.backends.values():
         for job in bs.jobs:
             if job.job_id and job.nodes and job.nodes != "-":
-                result[job.job_id] = job.nodes
+                result[(bs.name, job.job_id)] = job.nodes
     return result
 
 
@@ -1305,7 +1314,7 @@ def _collect_all_job_views() -> list[JobView]:
     if state.run_manager is None:
         return views
 
-    user = state.filter_user or "unknown"
+    users = _job_filter().users
 
     # Active runs (managed by RunManager)
     for run in state.run_manager.runs.values():
@@ -1314,8 +1323,10 @@ def _collect_all_job_views() -> list[JobView]:
                 job_id=item.job_id,
                 name=item.task.name,
                 # scripthut-submitted items have no scheduler-reported user;
-                # they belong to the configured user.
-                user=item.user or user,
+                # resolve legacy ownership from the backend, never the view.
+                user=item.user or (
+                    users.get(run.backend_name) if run.workflow_name != "_default" else None
+                ) or "unknown",
                 backend_name=run.backend_name,
                 state=item.status.value,
                 source="run" if run.workflow_name != "_default" else "external",
@@ -1376,8 +1387,8 @@ def _collect_all_job_views() -> list[JobView]:
 
 def _apply_job_filters(job_views: list[JobView]) -> list[JobView]:
     """Apply active filters (user filter, live view) to job views."""
-    if state.filter_enabled and state.filter_user:
-        job_views = [j for j in job_views if j.user == state.filter_user]
+    policy = _job_filter()
+    job_views = [j for j in job_views if policy.matches(j.backend_name, j.user)]
     if state.live_view:
         cutoff = datetime.now(UTC) - timedelta(hours=12)
         job_views = [
@@ -1492,7 +1503,7 @@ async def backends_page(request: Request) -> HTMLResponse:
             "poll_interval": poll_interval,
             "poll_remaining": state.seconds_until_next_poll,
             "filter_enabled": state.filter_enabled,
-            "filter_user": state.filter_user,
+            "filter_available": any(_job_filter().users.values()),
             "live_view": state.live_view,
         },
     )
@@ -1514,7 +1525,7 @@ async def jobs_partial(request: Request) -> HTMLResponse:
                 host=", ".join(c.status.host for c in state.backends.values() if c.status.connected),
             ),
             "filter_enabled": state.filter_enabled,
-            "filter_user": state.filter_user,
+            "filter_available": any(_job_filter().users.values()),
             "live_view": state.live_view,
         },
     )
@@ -1543,7 +1554,7 @@ async def jobs_stream(request: Request) -> EventSourceResponse:
                             host=", ".join(c.status.host for c in state.backends.values() if c.status.connected),
                         ),
                         "filter_enabled": state.filter_enabled,
-                        "filter_user": state.filter_user,
+                        "filter_available": any(_job_filter().users.values()),
                         "live_view": state.live_view,
                     }
                 )
@@ -1853,9 +1864,9 @@ async def toggle_filter(request: Request) -> HTMLResponse:
     """Toggle the user filter on/off and trigger immediate refresh."""
     state.filter_enabled = not state.filter_enabled
 
-    filter_user = state.filter_user if state.filter_enabled else None
+    job_filter = _job_filter()
     tasks = [
-        poll_backend(backend_state, filter_user=filter_user)
+        poll_backend(backend_state, filter_user=job_filter.query_user(backend_state.name))
         for backend_state in state.backends.values()
     ]
     if tasks:
@@ -1910,7 +1921,7 @@ async def filter_status() -> dict[str, Any]:
     """Get current filter status."""
     return {
         "enabled": state.filter_enabled,
-        "user": state.filter_user,
+        "users": dict(_job_filter().users),
     }
 
 
@@ -3077,7 +3088,7 @@ async def get_task_detail(
 
     # Look up compute node from live scheduler data
     job_nodes = _get_job_nodes()
-    node = job_nodes.get(item.job_id) if item.job_id else None
+    node = job_nodes.get((run.backend_name, item.job_id)) if item.job_id else None
 
     return JSONResponse({
         "content": content,
@@ -3674,7 +3685,7 @@ async def submit_interactive_task(
                 backend_name=backend_name,
                 job_id=job_id,
                 name=f"[debug] {item.task.name}",
-                user=state.filter_user or "unknown",
+                user=backend_state.current_user or "unknown",
                 state="submitted",
                 partition=item.task.partition,
                 cpus=item.task.cpus,
