@@ -576,7 +576,8 @@ This is useful for clusters requiring interactive authentication.
 
 **Development status:** Slurm submissions now persist intent before `sbatch` and
 recover uncertain responses through queue/accounting reconciliation (Phase 3).
-Browser-assisted login is a later phase; create the master externally as below.
+Browser-assisted login is available as an explicit opt-in below; external
+masters remain supported.
 PBS uses the transport but does not have Slurm's durable attempt recovery.
 See [submission recovery](#slurm-submission-recovery) before operating this mode.
 
@@ -707,3 +708,110 @@ understand the new states and can skip these runs or drop evidence when saving.
 Do not downgrade against a state directory containing version-3 runs. Resolve
 and finish those runs with this version, stop the controller, and archive the
 state before any downgrade; never use an old snapshot to resume uncertain jobs.
+
+## Browser-assisted SSH login
+
+Browser login is opt-in and requires a verified private access boundary. Keep it
+on loopback or behind a verified private HTTPS access policy. A proxy address
+alone is not proof of authorization. The feature is disabled by default; changes
+to its configuration require a controller restart.
+
+The controller invokes a fixed helper over an existing **verified loopback
+AsyncSSH backend**. The helper runs on the host, reads an owner-only profile, and
+creates the dedicated OpenSSH master. Install the standalone
+`src/scripthut/ssh/login_helper.py` as an executable, for example
+`/usr/local/libexec/scripthut-ssh-login`. The host needs Python 3.11+, OpenSSH,
+and `false`; no Python packages or host daemon are required. Host installation,
+socket mounts, and verification of the actual private-access policy belong to
+the deployment phase.
+
+Example host profile file (`/home/researcher/.config/scripthut/ssh-profiles.toml`,
+owned by that host user, mode 0600):
+
+```toml
+[profiles.cluster]
+host = "login.cluster.example"
+user = "researcher"
+port = 22
+control_path = "/home/researcher/.local/run/scripthut-ssh/cluster.sock"
+known_hosts = "/home/researcher/.ssh/known_hosts"
+# Optional for key-based authentication:
+# identity_file = "/home/researcher/.ssh/id_ed25519"
+timeout = 300
+control_persist = "8h"
+```
+
+Profile paths are absolute and do not expand `~`, `$`, or OpenSSH tokens. Use a
+verified known-hosts file; the helper will not accept an unknown host key. Each
+profile has a distinct socket. The socket's parent directory must be owned by
+the helper user and mode 0700. Each socket is locked against simultaneous login
+attempts. Existing healthy masters are checked and reused; an unhealthy existing
+socket is left alone for operator inspection. Never point a profile at a master
+owned by an unrelated workflow or user.
+
+Map configured backend IDs to these host profile IDs in `scripthut.yaml`:
+
+```yaml
+browser_login:
+  enabled: true
+  private_access_verified: true  # Set only after verifying the effective access policy
+  allowed_origins:
+    - https://scripthut.example.ts.net
+    # Or http://127.0.0.1:8000 for a loopback-only controller
+  host_backend: host
+  helper_path: /usr/local/libexec/scripthut-ssh-login
+  profiles_path: /home/researcher/.config/scripthut/ssh-profiles.toml
+  profiles:
+    cluster: cluster
+  timeout: 300
+```
+
+`host` must be an existing SSH backend whose `ssh.host` is `127.0.0.1`, `::1`, or
+`localhost`, `transport` is `asyncssh`, and `known_hosts` is configured. Each
+mapped target backend must use `transport: openssh`. Its host/user must match the
+host profile, and its controller-visible `control_path` must refer to the same
+socket through the deployment mount. Mount the private directory, not an
+individual socket, so replacement sockets remain visible. Do not mount the whole
+SSH directory into the controller.
+
+The backend card exposes **Connect in browser**, which opens a dedicated login
+page. Its JS/CSS are repository-versioned local assets, with no CDN or external
+scripts. Input is not echoed, output is bounded and transient, and the view is
+cleared when login ends or the page closes. A terminal fallback remains on the
+backend card. A password plus an MFA prompt can be relayed normally; the helper
+does not parse prompts, store passwords, or automatically retry authentication.
+
+The helper owns the authentication lifecycle. It verifies a fail-closed remote
+`true` after OpenSSH detaches; only exit zero reports success. Before that
+boundary, cancel, timeout, EOF, signals, and controller disconnect clean up the
+helper's own SSH child/master. After success, closing or cancelling the page
+leaves the master running. The server permits one attempt per backend; another
+window in the same session reports the active attempt, and another session
+cannot take it over.
+
+Browser operations require an exact allowed Origin, an HttpOnly SameSite=Strict
+session cookie (Secure on HTTPS), and a separate CSRF token. WebSocket ownership
+is checked before acceptance; its CSRF token is sent in the first frame rather
+than in a URL. The page uses a restrictive CSP and opener isolation. These
+requirements apply to the `/login` routes; existing non-browser CLI/API commands
+retain their contracts.
+
+Authentication channels bypass normal command logs, terminal registration, and
+history. Only non-secret attempt IDs/backend IDs/lifecycle states are exposed.
+Raw AsyncSSH packet dumps are disabled once browser login is enabled because
+level-3 debug packets can contain plaintext terminal input and output. Do not add
+reverse-proxy WebSocket frame logging or browser tracing to live login sessions.
+
+For local development, the helper tests use disposable password-authenticated SSH
+servers, never real MFA. Install the pinned browser test runner and its browser:
+
+```sh
+python -m pip install -e '.[dev,browser-tests]'
+python -m playwright install --with-deps chromium
+python -m pytest tests/test_login_helper.py tests/test_browser_login.py tests/test_login_browser.py
+```
+
+The helper and browser lifecycle tests are prerequisites for live authentication.
+The bundled browser test requires a supported Chromium environment including
+fonts. macOS host-helper behavior and the real deployment still require their
+own acceptance checks.

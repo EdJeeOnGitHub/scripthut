@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect {{backend}}</title><link rel="stylesheet" href="/login/assets/login-v1.css">
+<script defer src="/login/assets/login-v1.js"></script></head>
+<body data-backend="{{backend}}" data-csrf="{{csrf}}"><main>
+<h1>Connect {{backend}}</h1>
+<p>Authenticate with the cluster’s SSH prompts. Input is not echoed. Passwords and terminal output are not saved.</p>
+<p id="status" role="status">Disconnected</p>
+<div class="controls"><button id="start">Connect</button><button id="cancel" disabled>Cancel</button></div>
+<section id="terminal" tabindex="0" aria-label="SSH authentication terminal">
+<pre id="output" aria-live="polite"></pre>
+<label for="input">Authentication input</label>
+<textarea id="input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Authentication input" disabled></textarea>
+</section>
+<p>Click the input area to type. Press Enter to send a response. Once connected, closing this page leaves the connection running.</p>
+<p><a href="/backends">Back to backends and terminal connection instructions</a></p>
+</main></body></html>

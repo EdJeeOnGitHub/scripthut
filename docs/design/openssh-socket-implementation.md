@@ -1,6 +1,6 @@
 # OpenSSH socket integration: phased implementation
 
-Date: 2026-09-10. Status: Phases 1–3 complete; Phases 4–5 not started.
+Date: 2026-09-10. Status: Phases 1–4 complete; Phase 5 not started.
 
 ## Purpose and how to use this document
 
@@ -300,6 +300,45 @@ including CLI, restored runs, and interactive task submissions.
 
 ## Phase 4: browser-assisted login
 
+**Implemented and locally verified (2026-09-10).** Host installation and live
+private-access verification remain Phase 5.
+
+### Implementation decisions (2026-09-10)
+
+- Ship a standalone Python 3.11+ POSIX helper, installed as a fixed executable on
+  the host through agent-infra in Phase 5. It reads an owner-only TOML profile
+  file. Profile IDs select literal destinations, users, known-host files, and
+  dedicated sockets; browser requests cannot provide commands or destinations.
+- Lock each owned socket directory, require mode 0700, and refuse symlinks or
+  foreign-owned sockets. Healthy existing masters are checked with a remote
+  `true` and retained. An unresponsive existing socket requires operator cleanup;
+  the helper never guesses whether an existing master belongs to this attempt.
+- Authenticate OpenSSH using a nested controlling PTY with echo disabled and
+  `-f -M -N`, verified host keys, 8-hour ControlPersist, and 30-second/three-miss
+  keepalives. Verify fail-closed multiplexed remote execution after OpenSSH
+  detaches. Exit zero is the success boundary; before that boundary EOF, signals,
+  timeout, and failure clean up the attempt's own foreground process and master.
+  Tests must exercise the fork/detach and cancellation boundary before UI rollout.
+- Browser login is disabled by default. Enabling requires an explicit verified
+  private-access declaration, exact allowed origins, and a configured verified
+  loopback SSH backend used exclusively to invoke the fixed helper command.
+- Issue random, HttpOnly, SameSite=Strict session cookies on the dedicated page
+  (Secure on HTTPS), and a separate session CSRF token. Bind start/cancel/status
+  and WebSockets to that session. Require Origin for mutations and WebSockets;
+  deliver the WebSocket CSRF token in its first frame, never in URLs or logs.
+- Reserve one attempt per backend; authentication starts only after the owning
+  WebSocket attaches. Expire unattached reservations and abort attached attempts
+  on browser/controller exit or the five-minute deadline. Success remains final
+  even when a close/cancel races with notification delivery.
+- Reuse the byte-process adapter and terminal relay without TerminalManager or
+  command-log registration. Use a dedicated, repository-versioned JS/CSS terminal
+  with no CDN, no input echo, bounded transient output, and a restrictive CSP.
+  Do not store transcripts, input, exception text, or remote error text in status.
+- Use disposable SSH servers for real helper lifecycle tests and ASGI/WebSocket
+  tests for endpoint ownership/origin/CSRF and transcript exclusion. Browser
+  behavior is tested with a local browser when available; never use live MFA.
+
+
 ### Deliverable
 
 - Prototype the generic host helper's PTY/authenticate/detach lifecycle before
@@ -333,6 +372,48 @@ Before implementation, specify helper installation/profile format, ownership
 and cleanup rules, detach evidence, API/session protocol, origin/CSRF handling,
 and browser test tooling here. Do not proceed to live browser authentication
 until these local lifecycle and endpoint tests pass.
+
+### Implementation and validation
+
+- The standalone `ssh/login_helper.py` uses a controlling, non-echoing PTY,
+  per-socket locks, strict host keys, and fail-closed post-detach verification.
+  An independent signal alarm bounds authentication even if output backpressure
+  blocks the helper. SSH escape commands are disabled.
+- `browser_login.py` owns session cookies, CSRF tokens, exact-origin checks,
+  reservations, WebSocket ownership, cancellation, deadlines, and shutdown.
+  The existing byte relay is reused through a lifecycle adapter. Login channels
+  request ECHO=0 before helper startup and never register in normal terminal or
+  command history. Raw AsyncSSH packet logging is suppressed to prevent debug
+  capture of plaintext authentication traffic.
+- The dedicated login page uses packaged `login-v1.js` and `login-v1.css`, a
+  restrictive CSP, no-store responses, and same-origin opener isolation. It
+  clears input/output on completion or page exit; duplicate windows report the
+  existing attempt. Browser-login configuration changes require restart.
+- Twelve helper tests exercise actual OpenSSH password authentication, no echo,
+  verified detach, master reuse, stale sockets, profile permissions, locks,
+  timeout, EOF, signals, and cancellation after fork but before verification.
+  They also exercise the full helper path over verified loopback AsyncSSH:
+  controller disconnect cleans up before success and preserves the master after.
+- Fourteen endpoint/lifecycle tests cover origins, sessions, CSRF, duplicate
+  starts, connection-opening/cancel races, success/cancel races, deadlines,
+  shutdown, explicit private-access configuration, and transcript/log exclusion.
+- Five real Chromium tests verify successful login, cancellation, page-close
+  cleanup, failure, duplicate windows, no input echo or persistent transcript,
+  and post-success survival. Playwright is pinned in the `browser-tests` extra.
+- Final suite: **1332 passed, 1 skipped, 16 existing warnings**. New modules and
+  tests pass Ruff, with no new Ruff diagnostics in modified existing modules.
+  Mypy remains at the Phase 3 baseline of 112 errors in 18 files; no new
+  normalized diagnostics. `git diff --check` passes. A built wheel was inspected
+  and includes the helper and all locally served login assets.
+- Tested on Linux/Python 3.14 with disposable SSH servers and Chromium 141
+  (Playwright 1.56.0). This minimal Arch host required temporary browser libraries
+  and fonts under `/tmp`; missing fonts initially caused a diagnosed renderer
+  crash, resolved before the final browser/full-suite passes. No host system
+  packages, live credentials, MFA services, or deployment configuration changed.
+- Phase 4 work is isolated on `feat/browser-login` in `/tmp/scripthut-phase4`, based
+  on `b5dd8f6`, to preserve concurrent QoS/job-filter work in the original checkout.
+  Deployment and combined-change acceptance remain Phase 5; macOS is untested.
+
 
 ## Phase 5: pinned deployment and live acceptance
 
@@ -377,8 +458,8 @@ Julia/modules setup, and retained-results layout are separate work.
 | --- | --- | --- |
 | 1 | Complete | `8d8c2e1` (known-hosts), `ffb4597` (TIMEOUT); validation below |
 | 2 | Complete | `9305a64` and backend-card follow-up on the same branch; validation below |
-| 3 | Not started | Dirty-save and scheduling failure paths identified |
-| 4 | Not started | Browser access/lifecycle requirements recorded |
+| 3 | Complete | `b5dd8f6`; 1301 tests passed, including real master-loss recovery |
+| 4 | Complete | `feat/browser-login`; 1332 tests passed, including five Chromium tests |
 | 5 | Not started | Existing deployment facts in handoff; Serve route checked during planning |
 
 Update each row with commit IDs, test results, and links to non-secret evidence
