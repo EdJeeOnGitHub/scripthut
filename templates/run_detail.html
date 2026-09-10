@@ -10,6 +10,36 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    document.addEventListener('submit', async (event) => {
+        const form = event.target.closest('[data-submission-resolution]');
+        if (!form) return;
+        event.preventDefault();
+        const action = event.submitter?.value || 'check';
+        const fields = new FormData(form);
+        const message = form.querySelector('[role="status"]');
+        const confirmed = fields.has('confirm_not_submitted');
+        if (action === 'retry' && (!confirmed || !window.confirm('Authorize another submission? This can create a duplicate if the earlier job exists.'))) {
+            message.textContent = 'Retry requires explicit confirmation that no job was submitted.';
+            return;
+        }
+        const buttons = form.querySelectorAll('button');
+        buttons.forEach(button => button.disabled = true);
+        try {
+            const response = await fetch(`/api/v1/runs/${encodeURIComponent(form.dataset.run)}/tasks/${encodeURIComponent(form.dataset.task)}/submission`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action, attempt_id: form.dataset.attempt,
+                    job_id: fields.get('job_id') || null, confirm_not_submitted: confirmed})
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.detail || 'Resolution failed');
+            window.location.reload();
+        } catch (error) {
+            message.textContent = error.message;
+            buttons.forEach(button => button.disabled = false);
+        }
+    });
+    </script>
 </head>
 
 <body class="bg-gray-100 min-h-screen">

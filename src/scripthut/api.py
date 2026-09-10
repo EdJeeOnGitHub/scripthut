@@ -26,6 +26,7 @@ from scripthut.config_schema import (
     SlurmBackendConfig,
 )
 from scripthut.runs.models import Run, RunItemStatus
+from scripthut.submission import SubmissionConflict
 
 if TYPE_CHECKING:
     from scripthut.main import AppState
@@ -73,6 +74,13 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "submitted_count": submitted_count,
         "status_counts": counts,
     }
+
+
+class SubmissionResolutionRequest(BaseModel):
+    attempt_id: str
+    action: str = "check"
+    job_id: str | None = None
+    confirm_not_submitted: bool = False
 
 
 class DiskCleanRequest(BaseModel):
@@ -666,10 +674,34 @@ def make_api_router(state: AppState) -> APIRouter:
             )
         return rm.get_task_manifest(run, item)
 
+    @router.post("/runs/{run_id}/tasks/{task_id}/submission")
+    async def resolve_submission(
+        run_id: str, task_id: str, body: SubmissionResolutionRequest, request: Request,
+    ) -> dict[str, Any]:
+        origin = request.headers.get("origin")
+        if origin is not None and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+            raise HTTPException(status_code=403, detail="Cross-origin resolution is not allowed")
+        rm = _require_manager()
+        run = rm.get_run(run_id)
+        item = run.get_item_by_task_id(task_id) if run else None
+        if run is None or item is None:
+            raise HTTPException(status_code=404, detail="Run or task not found")
+        try:
+            result = await rm.submissions.resolve(run, item, **body.model_dump())
+        except SubmissionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        state.notify_poll()
+        return result
+
     @router.post("/runs/{run_id}/cancel")
     async def cancel_run(run_id: str) -> dict[str, Any]:
         rm = _require_manager()
-        cancelled = await rm.cancel_run(run_id)
+        try:
+            cancelled = await rm.cancel_run(run_id)
+        except SubmissionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not cancelled:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         return {"run_id": run_id, "cancelled": True}
@@ -679,6 +711,8 @@ def make_api_router(state: AppState) -> APIRouter:
         rm = _require_manager()
         try:
             run = await rm.rerun_in_place(run_id)
+        except SubmissionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except Exception as e:

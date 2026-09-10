@@ -472,3 +472,64 @@ async def test_connection_loss_during_command_is_not_retried(ssh_master):
     assert state["commands"].count(command) == 1
     assert state["connections"] == 1
     assert not client._children and not client.is_connected
+
+
+async def test_submission_recovers_after_master_loss_and_controller_restart(ssh_master):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from scripthut.backends.slurm import SlurmBackend
+    from scripthut.runs.manager import RunManager
+    from scripthut.runs.models import Run, RunItem, RunItemStatus, TaskDefinition
+    from scripthut.runs.storage import RunStorageManager
+
+    client, observations, masters, restart, tmp_path = ssh_master
+    await client.connect()
+    sbatch = tmp_path / "sbatch"
+    sbatch.write_text(
+        '#!/bin/sh\ncat > submitted-script\n'
+        'printf "123|%s|test\\n" "${1#--job-name=}" >> allocations\n'
+        'sleep 1\necho "Submitted batch job 123"\n'
+    )
+    sbatch.chmod(0o700)
+    for name in ("squeue", "sacct"):
+        path = tmp_path / name
+        path.write_text('#!/bin/sh\ncat allocations\n')
+        path.chmod(0o700)
+    original = client.run_command
+
+    async def with_path(command, timeout=30):
+        return await original(f"export PATH={shlex.quote(str(tmp_path))}:$PATH; {command}", timeout)
+
+    client.run_command = with_path
+    config = SimpleNamespace(get_backend=lambda name: SimpleNamespace(max_concurrent=4))
+    storage = RunStorageManager(tmp_path / "runs")
+    backend = SlurmBackend(client)
+    manager = RunManager(config, {"b": client}, storage, {"b": backend})
+    manager._resolve_environment = lambda run, task: ({}, "")
+    run = Run("loss", "workflow", "b", datetime.now(UTC), [
+        RunItem(TaskDefinition(id="task", name="task", command="true")),
+    ], 1, log_dir=str(tmp_path / "logs"))
+    manager.runs[run.id] = run
+    task = asyncio.create_task(manager.process_run(run))
+    try:
+        async with asyncio.timeout(5):
+            while not (tmp_path / "allocations").exists():
+                await asyncio.sleep(0.01)
+        masters[0].terminate()
+        await masters[0].wait()
+        await asyncio.wait_for(task, 5)
+        assert run.items[0].status == RunItemStatus.SUBMISSION_UNKNOWN
+        assert storage.load_all_runs()[run.id].items[0].submission_unresolved
+        await restart()
+        await client.check_connection(force=True)
+        restored = RunManager(config, {"b": client}, storage, {"b": backend})
+        await restored.restore_from_storage()
+        assert restored.runs[run.id].items[0].job_id == "123"
+        assert restored.runs[run.id].items[0].status == RunItemStatus.SUBMITTED
+        assert len((tmp_path / "allocations").read_text().splitlines()) == 1
+        assert observations["connections"] == 2
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

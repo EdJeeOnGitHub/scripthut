@@ -462,6 +462,19 @@ class LocalClient:
             raise RuntimeError(f"Task '{task_id}' not found in run '{run_id}'")
         return rm.get_task_manifest(run, item)
 
+    async def resolve_submission(self, run_id: str, task_id: str, **body: Any) -> dict[str, Any]:
+        rm = self.runtime.run_manager
+        if rm.storage:
+            for key, stored_run in rm.storage.load_all_runs().items():
+                rm.runs.setdefault(key, stored_run)
+        run = rm.get_run(run_id)
+        item = run.get_item_by_task_id(task_id) if run else None
+        if run is None or item is None:
+            raise RuntimeError("Run or task not found")
+        result = await rm.submissions.resolve(run, item, **body)
+        await rm.process_run(run)
+        return result
+
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
         # cancel_run requires the run to be in-memory; load it first.
         rm = self.runtime.run_manager
@@ -644,6 +657,11 @@ class RemoteClient:
 
     async def get_task_manifest(self, run_id: str, task_id: str) -> dict[str, Any]:
         return await self._get(f"/runs/{run_id}/tasks/{task_id}/manifest")
+
+    async def resolve_submission(self, run_id: str, task_id: str, **body: Any) -> dict[str, Any]:
+        return self._handle(await self._client.post(
+            f"/runs/{run_id}/tasks/{task_id}/submission", json=body,
+        ))
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
         return await self._post(f"/runs/{run_id}/cancel")
@@ -3753,6 +3771,18 @@ async def _cmd_run_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_run_resolve(args: argparse.Namespace) -> int:
+    async with _make_client(args) as client:
+        result = await client.resolve_submission(
+            args.id, args.task, attempt_id=args.attempt, action=args.action,
+            job_id=args.job_id, confirm_not_submitted=args.confirm_not_submitted,
+        )
+    if args.json:
+        return _emit_json(result)
+    print(f"{args.id}/{args.task}: {result['status']}")
+    return 0
+
+
 async def _cmd_run_cancel(args: argparse.Namespace) -> int:
     async with _make_client(args) as client:
         await client.cancel_run(args.id)
@@ -3989,6 +4019,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(p_run_watch)
     p_run_watch.set_defaults(handler=_cmd_run_watch)
+
+    p_resolve = run_sub.add_parser("resolve", help="Resolve an unknown Slurm submission")
+    p_resolve.add_argument("id")
+    p_resolve.add_argument("task")
+    p_resolve.add_argument("--attempt", required=True, help="Attempt ID from run view")
+    p_resolve.add_argument("--action", choices=["check", "bind", "retry"], default="check")
+    p_resolve.add_argument("--job-id")
+    p_resolve.add_argument("--confirm-not-submitted", action="store_true")
+    _add_common(p_resolve)
+    p_resolve.set_defaults(handler=_cmd_run_resolve)
 
     p_run_cancel = run_sub.add_parser("cancel", help="Cancel a running run")
     p_run_cancel.add_argument("id")

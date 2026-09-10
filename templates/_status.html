@@ -21,6 +21,8 @@
 <span class="w-2 h-2 rounded-full flex-shrink-0 bg-indigo-500 animate-pulse"></span>
 {%- elif status == 'settling' -%}
 <svg class="w-3 h-3 flex-shrink-0 text-gray-400 animate-pulse" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M4 9l4 4 4-4"/></svg>
+{%- elif status in ('submitting', 'submission_unknown') -%}
+<span class="text-orange-600 font-bold" title="{{ status }}">?</span>
 {%- elif status == 'submitted' -%}
 <svg class="w-3 h-3 flex-shrink-0 text-yellow-500" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4"/></svg>
 {%- elif status == 'queued' -%}
@@ -46,6 +48,7 @@
 {%- elif status == 'running' -%}bg-indigo-500
 {%- elif status == 'settling' -%}bg-gray-400
 {%- elif status == 'queued' -%}bg-yellow-600
+{%- elif status in ('submitting', 'submission_unknown') -%}bg-orange-600
 {%- elif status == 'submitted' -%}bg-yellow-500
 {%- elif status == 'pending' -%}bg-gray-400
 {%- else -%}bg-gray-400
@@ -71,6 +74,8 @@
     ('running', 'bg-indigo-500 animate-pulse'),
     ('queued', 'bg-yellow-600'),
     ('submitted', 'bg-yellow-500'),
+    ('submitting', 'bg-orange-600'),
+    ('submission_unknown', 'bg-orange-600'),
     ('pending', 'bg-gray-200'),
 ] -%}
 {%- set n = counts.get(s, 0) -%}

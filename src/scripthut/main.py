@@ -158,6 +158,7 @@ _config_path: Path | None = None
 
 async def poll_backend(backend_state: BackendState, filter_user: str | None = None) -> None:
     """Poll jobs for a single backend."""
+    backend_state.poll_fresh = False
     if not backend_state.enabled:
         return
     if backend_state.backend is None:
@@ -288,6 +289,7 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
                 logger.info(f"Got stats for {len(job_stats)}/{len(sacct_ids)} jobs on '{backend_state.name}'")
             except Exception as e:
                 logger.warning(f"Stats fetch failed for '{backend_state.name}': {e}")
+                raise
 
         # Write stats back to RunItems and correct false completions
         if state.run_manager and job_stats:
@@ -300,6 +302,8 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
                 # those newly-eligible items to actually get submitted.
                 needs_reprocess = False
                 for item in run.items:
+                    if item.submission_unresolved:
+                        continue
                     if item.job_id and item.job_id in job_stats:
                         s = job_stats[item.job_id]
                         item.cpu_efficiency = s.cpu_efficiency
@@ -567,6 +571,8 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
                     f"Reconciled {reconciled} stale external jobs for '{backend_state.name}'"
                 )
 
+        backend_state.poll_fresh = True
+
     except Exception as e:
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         logger.error(f"Job polling failed for '{backend_state.name}': {e}")
@@ -602,6 +608,8 @@ async def poll_jobs() -> None:
         if state.run_manager and state.run_manager.get_active_runs():
             backend_jobs: dict[str, list[tuple]] = {}
             for name, bs in state.backends.items():
+                if not bs.poll_fresh:
+                    continue
                 backend_jobs[name] = [
                     (job.job_id, job.state, getattr(job, "reason", None))
                     for job in bs.jobs
@@ -2705,12 +2713,15 @@ async def run_events(request: Request, run_id: str) -> EventSourceResponse:
 
 
 @app.post("/runs/{run_id}/cancel")
-async def cancel_run(run_id: str) -> dict[str, Any]:
+async def cancel_run(run_id: str) -> Any:
     """Cancel all pending and running items in a run."""
     if state.run_manager is None:
         return {"error": "Run manager not initialized"}
 
-    success = await state.run_manager.cancel_run(run_id)
+    try:
+        success = await state.run_manager.cancel_run(run_id)
+    except (ValueError, RuntimeError) as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
     if success:
         return {"status": "cancelled", "run_id": run_id}
     else:
@@ -3565,7 +3576,7 @@ async def interactive_job_status(backend_name: str, job_id: str) -> dict[str, An
 @app.post("/terminal/interactive/{backend_name}/{run_id}/{task_id}")
 async def submit_interactive_task(
     backend_name: str, run_id: str, task_id: str,
-) -> dict[str, Any]:
+) -> Any:
     """Re-submit a task with interactive_wait=True and return the new job ID."""
     if state.run_manager is None:
         return JSONResponse(
@@ -3588,60 +3599,25 @@ async def submit_interactive_task(
             content={"error": f"Backend '{backend_name}' not available"},
         )
 
-    ssh_client = backend_state.ssh_client
-    job_backend = backend_state.backend
-
-    # Resolve log dir
-    log_dir = run.log_dir
-    if log_dir.startswith("~"):
-        try:
-            stdout, _, _ = await ssh_client.run_command("echo $HOME")
-            log_dir = log_dir.replace("~", stdout.strip(), 1)
-        except Exception:
-            pass
-
-    await ssh_client.run_command(f"mkdir -p {log_dir}")
-
-    # Build script with interactive_wait=True
-    merged_env, extra_init = state.run_manager._resolve_environment(run, item.task)
-    script = job_backend.generate_script(
-        item.task, run.id, log_dir,
-        account=run.account, login_shell=run.login_shell,
-        env_vars=merged_env, extra_init=extra_init,
-        interactive_wait=True,
-    )
-
-    try:
-        job_id = await job_backend.submit_job(script)
-        logger.info(
-            f"Submitted interactive job {job_id} for task '{task_id}' "
-            f"(run {run_id}) on backend '{backend_name}'"
+    if backend_name != run.backend_name:
+        return JSONResponse(
+            status_code=409, content={"error": "Backend must match the original run"},
         )
-
-        # Register as external job so it appears in the jobs list immediately
-        if state.run_storage:
-            state.run_storage.add_external_job(
-                backend_name=backend_name,
-                job_id=job_id,
-                name=f"[debug] {item.task.name}",
-                user=state.filter_user or "unknown",
-                state="submitted",
-                partition=item.task.partition,
-                cpus=item.task.cpus,
-                memory=item.task.memory,
-                submit_time=datetime.now(UTC),
-            )
-
-        # Track as debug job so the terminals page can identify it
-        state.debug_job_ids.add(job_id)
-
-        return {
-            "job_id": job_id,
-            "backend_name": backend_name,
-        }
-    except RuntimeError as e:
-        logger.error(f"Interactive submit failed for task '{task_id}': {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    try:
+        debug = await state.run_manager.create_debug_run(run, item)
+    except Exception as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+    debug_item = debug.items[0]
+    if debug_item.submission_unresolved or not debug_item.job_id:
+        return JSONResponse(status_code=202, content={
+            "run_id": debug.id, "status": debug_item.status.value,
+            "error": (
+                f"Debug submission is {debug_item.status.value}; "
+                f"inspect /runs/{debug.id} before retrying"
+            ),
+        })
+    state.debug_job_ids.add(debug_item.job_id)
+    return {"job_id": debug_item.job_id, "backend_name": backend_name, "run_id": debug.id}
 
 
 def parse_args() -> argparse.Namespace:

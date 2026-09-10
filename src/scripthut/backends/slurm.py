@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from scripthut.backends.base import (
@@ -27,7 +29,8 @@ from scripthut.backends.utils import (
     parse_rss_to_bytes,
 )
 from scripthut.models import JobState, SlurmJob
-from scripthut.ssh.transport import ExecutionClient
+from scripthut.ssh.transport import ExecutionClient, TransportError
+from scripthut.submission import SubmissionAttempt, SubmissionRejected
 
 if TYPE_CHECKING:
     from scripthut.runs.models import TaskDefinition
@@ -362,7 +365,7 @@ class SlurmBackend(JobBackend):
 
         if exit_code != 0:
             logger.error(f"squeue failed (exit {exit_code}): {stderr}")
-            return []
+            raise TransportError(f"squeue failed: {stderr}")
 
         jobs: list[SlurmJob] = []
         for line in stdout.strip().split("\n"):
@@ -463,11 +466,10 @@ class SlurmBackend(JobBackend):
             stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=30)
         except Exception as e:
             logger.warning(f"sacct command failed: {e}")
-            return stats  # still return stale markers
+            raise TransportError(f"sacct command failed: {e}") from e
 
         if exit_code != 0:
-            logger.warning(f"sacct failed (exit {exit_code}): {stderr}")
-            return stats
+            raise TransportError(f"sacct failed (exit {exit_code}): {stderr}")
 
         logger.debug(f"sacct raw output ({len(stdout)} chars): {stdout[:500]}")
 
@@ -1083,9 +1085,61 @@ class SlurmBackend(JobBackend):
         del task, env_vars  # script carries everything Slurm needs
         return await self._submit_and_verify(script)
 
+    async def submit_attempt(
+        self, script: str, attempt: SubmissionAttempt,
+        accepted: Callable[[str, str], None],
+    ) -> SubmitResult:
+        """Submit once, persisting the returned ID before any verification query."""
+        delimiter = f"SCRIPTHUT_{attempt.id}"
+        command = (
+            f"sbatch --job-name={shlex.quote(attempt.scheduler_name)} <<'{delimiter}'\n"
+            f"{script}\n{delimiter}"
+        )
+        stdout, stderr, code = await self._ssh.run_command(command)
+        output = format_submit_output(stdout, stderr)
+        match = _SBATCH_JOB_ID_RE.search(stdout) or _SBATCH_JOB_ID_RE.search(stderr)
+        if match:
+            accepted(match.group(1), output)
+        if code == 255 or code < 0:
+            raise TransportError(f"Submission transport failed: {output}")
+        if code and not match:
+            raise SubmissionRejected(f"sbatch rejected submission (exit {code}): {output}")
+        if code or not match:
+            raise TransportError(f"Submission outcome unknown: {output}")
+        return SubmitResult(job_id=match.group(1), submit_output=output)
+
+    async def find_attempt(self, attempt: SubmissionAttempt) -> set[str]:
+        """Return matching allocations only when both local-cluster queries succeed."""
+        user = shlex.quote(attempt.user)
+        name = shlex.quote(attempt.scheduler_name)
+        since = (attempt.created_at - timedelta(minutes=5)).astimezone(UTC)
+        commands = [
+            f"squeue --local --noheader --format='%i|%j|%u' --user={user} --name={name}",
+            "TZ=UTC sacct --local --allocations --duplicates --noheader --parsable2"
+            f" --format=JobIDRaw,JobName%128,User%128 --user={user} --name={name}"
+            f" --starttime={since.strftime('%Y-%m-%dT%H:%M:%S')}",
+        ]
+        matches: set[str] = set()
+        for command in commands:
+            stdout, stderr, code = await self._ssh.run_command(command)
+            if code:
+                raise TransportError(f"Submission reconciliation query failed: {stderr}")
+            for line in stdout.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.strip().split("|")
+                if len(parts) < 3 or not re.fullmatch(r"\d+", parts[0].strip()):
+                    raise TransportError("Malformed submission reconciliation response")
+                job_id, job_name, owner = (p.strip() for p in parts[:3])
+                if job_name == attempt.scheduler_name and owner == attempt.user:
+                    matches.add(job_id)
+        return matches
+
     async def cancel_job(self, job_id: str) -> None:
         """Cancel a Slurm job via scancel."""
-        await self._ssh.run_command(f"scancel {job_id}")
+        _, stderr, code = await self._ssh.run_command(f"scancel {shlex.quote(job_id)}")
+        if code:
+            raise RuntimeError(f"scancel failed: {stderr}")
 
     def generate_script(
         self,

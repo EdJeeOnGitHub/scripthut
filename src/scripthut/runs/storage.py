@@ -81,8 +81,11 @@ class RunStorageManager:
 
     # --- Core CRUD ---
 
-    def save_run(self, run: Run) -> None:
+    def save_run(self, run: Run, *, durable: bool = False) -> bool:
         """Write run.json atomically."""
+        # Later dirty saves must not replace a durable attempt with an
+        # unflushed file. Keep the durability guarantee for the run's lifetime.
+        sync = durable or run.interactive_wait or any(i.submission_attempts for i in run.items)
         if run.workflow_name == "_default":
             # Weekly bins use a different directory structure
             # Determine the week from created_at
@@ -95,7 +98,9 @@ class RunStorageManager:
         temp_path = run_dir / "run.json.tmp"
 
         data: dict[str, Any] = {
-            "version": 2,
+            "version": (
+                3 if run.interactive_wait or any(i.submission_attempts for i in run.items) else 2
+            ),
             "id": run.id,
             "workflow_name": run.workflow_name,
             "backend_name": run.backend_name,
@@ -104,6 +109,8 @@ class RunStorageManager:
             "log_dir": run.log_dir,
             "account": run.account,
             "login_shell": run.login_shell,
+            "interactive_wait": run.interactive_wait,
+            "debug_source": run.debug_source,
             "commit_hash": run.commit_hash,
             "git_repo": run.git_repo,
             "git_branch": run.git_branch,
@@ -126,11 +133,27 @@ class RunStorageManager:
         try:
             with open(temp_path, "w") as f:
                 json.dump(data, f, indent=2)
+                if sync:
+                    f.flush()
+                    os.fsync(f.fileno())
             os.replace(temp_path, run_path)
+            if sync and os.name == "posix":
+                # Also persist newly created ancestor directory entries. This
+                # matters when the attempt is the first write for a new run.
+                for directory in (run_dir, *run_dir.parents):
+                    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+            return True
         except Exception as e:
             logger.error(f"Failed to save run '{run.id}': {e}")
             if temp_path.exists():
                 temp_path.unlink()
+            if durable:
+                raise
+            return False
 
     def load_run(self, run_dir: Path) -> Run | None:
         """Load a Run from a directory's run.json."""
@@ -165,6 +188,8 @@ class RunStorageManager:
                 log_dir=data.get("log_dir", "~/.cache/scripthut/logs"),
                 account=data.get("account"),
                 login_shell=data.get("login_shell", False),
+                interactive_wait=data.get("interactive_wait", False),
+                debug_source=data.get("debug_source"),
                 commit_hash=data.get("commit_hash"),
                 git_repo=data.get("git_repo"),
                 git_branch=data.get("git_branch"),
@@ -251,15 +276,18 @@ class RunStorageManager:
         """Save all dirty runs to disk."""
         if not self._dirty_runs:
             return
+        failed: set[str] = set()
         for run_id in list(self._dirty_runs):
             if run_id in runs:
-                self.save_run(runs[run_id])
+                if not self.save_run(runs[run_id]):
+                    failed.add(run_id)
         # Also save dirty weekly runs from cache
         for backend_runs in self._weekly_cache.values():
             for week_id, run in backend_runs.items():
                 if run.id in self._dirty_runs:
-                    self.save_run(run)
-        self._dirty_runs.clear()
+                    if not self.save_run(run):
+                        failed.add(run.id)
+        self._dirty_runs = failed
 
     # --- External job weekly binning ---
 

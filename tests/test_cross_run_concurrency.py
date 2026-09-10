@@ -68,6 +68,7 @@ def _manager(backend_max: int) -> RunManager:
 def _stub_submit(manager: RunManager) -> AsyncMock:
     """Replace submit_task with a stub that just marks the item SUBMITTED,
     so process_run's real slot math runs without the SSH/env path."""
+
     async def fake_submit(run: Run, item: RunItem) -> bool:
         item.status = RunItemStatus.SUBMITTED
         item.job_id = f"job-{item.task.id}"
@@ -92,7 +93,9 @@ class TestCrossRunConcurrency:
         submit = _stub_submit(mgr)
 
         # --- Phase 1: cap is full, B must NOT be submitted. ---
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
         assert b_item.status == RunItemStatus.PENDING
         submit.assert_not_awaited()
 
@@ -100,7 +103,9 @@ class TestCrossRunConcurrency:
         a_item.status = RunItemStatus.COMPLETED
         assert run_a.status == RunStatus.COMPLETED  # A is now terminal
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         # The freed backend slot is claimed by B even though B itself had
         # no item-state change this cycle. This is the regression: before
@@ -117,11 +122,11 @@ class TestCrossRunConcurrency:
         mgr.runs = {"A": _run("A", a_item), "B": _run("B", b_item)}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
-        submitted = [
-            i for i in (a_item, b_item) if i.status == RunItemStatus.SUBMITTED
-        ]
+        submitted = [i for i in (a_item, b_item) if i.status == RunItemStatus.SUBMITTED]
         pending = [i for i in (a_item, b_item) if i.status == RunItemStatus.PENDING]
         assert len(submitted) == 1, "backend cap of 1 must not be exceeded"
         assert len(pending) == 1

@@ -1,6 +1,6 @@
 # OpenSSH socket integration: phased implementation
 
-Date: 2026-09-10. Status: Phases 1–2 complete; Phases 3–5 not started.
+Date: 2026-09-10. Status: Phases 1–3 complete; Phases 4–5 not started.
 
 ## Purpose and how to use this document
 
@@ -192,6 +192,44 @@ The Phase 3 deployment gate still applies.
 
 ## Phase 3: disconnection and submission correctness
 
+**Implemented (2026-09-10).** See validation below.
+
+### Implementation decisions (2026-09-10)
+
+- Apply durable attempt tracking to controller-managed Slurm submissions through
+  either SSH transport. Preparation failures defer work; an unresolved attempt
+  pauses further submissions in its run and consumes a concurrency slot. Healthy
+  unrelated runs continue. Existing API-based backends retain their submission
+  contracts; SSH transport errors never trigger failure cascades.
+- Add `submitting` and `submission_unknown` states and append-only attempt history.
+  Persist UUID, timestamp, bounded scheduler name, backend destination/user,
+  returned job ID, and resolution. Write synchronously before sbatch and as soon
+  as a job ID arrives, using atomic replacement and fsync (including directories
+  on POSIX). A failed durable write prevents submission or leaves an unknown
+  outcome; dirty-save batching cannot substitute for this boundary.
+- Slurm names use a sanitized readable prefix plus `--sh-<UUID hex>`, bounded to
+  100 characters. Supply the name as a command-line sbatch option, preserving
+  existing comments. Use a unique quoted heredoc delimiter for script staging.
+- Reconcile with both `squeue --local` and `sacct --local --allocations`, scoped
+  to the configured user, exact name, and (for accounting) the attempt timestamp
+  minus five minutes in UTC. Read untruncated names. Reject destination changes,
+  malformed results, query failures, and multiple distinct matches. No match
+  never authorizes automatic retry. Persisted job IDs must agree with evidence.
+- Serialize submission/reconciliation actions per run. This continues the
+  existing single-controller ownership model: standalone CLI and controller
+  processes must not concurrently manage the same state directory.
+- Expose session-independent UI/API/CLI actions `check`, `bind` (verified matching
+  scheduler ID), and `retry` (explicit declaration that the previous attempt was
+  not submitted, with an attempt-ID precondition). Reject cancel/delete/rerun
+  while unresolved. Retain history after manual resolution and reruns.
+- Track poll freshness explicitly. Failed polls preserve cached display state,
+  but cannot be passed as fresh scheduling evidence. Runtime and direct submission
+  paths share availability gates. Restore all runs before driving any scheduling,
+  converting interrupted attempts to unknown and reconciling them first.
+- Interactive debug submissions become separate persisted runs using the same
+  submission path, rather than calling sbatch directly or changing the source
+  task. The original task/backend must match the request.
+
 ### Deliverable
 
 - Carry explicit backend availability and poll freshness into scheduling and
@@ -231,6 +269,34 @@ Before implementation, specify the state transitions, durable-write contract,
 reconciliation query/marker format, run-pausing policy, public resolution
 actions, and cancellation semantics here. Audit every submission entrypoint,
 including CLI, restored runs, and interactive task submissions.
+
+### Implementation and validation
+
+- `runs/submission.py` owns synchronous intent/ID persistence, serialization,
+  scoped reconciliation, and deliberate resolution. Per-backend submission locks
+  also protect concurrency caps while preparation is awaiting SSH.
+- `RunManager` defers transport failures and pauses unresolved runs. Startup loads
+  all runs before reconciliation/scheduling. Polling passes only successful
+  refreshes and propagates accounting failures instead of treating them as empty.
+- UI/API/CLI expose attempt history and guarded resolution. Interactive debug
+  submission uses a separate persisted run and reuses an active debug run.
+- Recovery tests inject lost responses, failed verification, pre/post-submission
+  write errors, fsync errors, restarts, query ambiguity/unavailability, stale
+  actions, concurrent requests, dependencies, and backend slot pressure. They
+  cover old state loading, API/CLI/UI actions, and debug submissions.
+- A real OpenSSH master test accepts one simulated Slurm allocation, kills the
+  master before its response, restarts the master and controller, and adopts the
+  same allocation. The allocation journal contains exactly one entry.
+- Local validation uses Linux/Python 3.14 and a disposable SSH server with fake
+  Slurm commands. No real cluster submission or service deployment was performed.
+  Cluster-specific scheduler behavior and macOS need operational validation.
+- Final suite: **1301 passed, 1 skipped, 16 existing warnings**. New recovery
+  modules pass Ruff; changed files introduce no new Ruff diagnostics. Mypy
+  reports 112 existing errors across 18 files (Phase 2: 117), with no new
+  normalized diagnostics. `git diff --check` passes.
+- Operator instructions and version-3 rollback constraints are in
+  [backend configuration](../configuration/backends.md#slurm-submission-recovery).
+
 
 ## Phase 4: browser-assisted login
 

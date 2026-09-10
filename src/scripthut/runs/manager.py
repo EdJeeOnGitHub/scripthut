@@ -8,12 +8,17 @@ import json
 import logging
 import shlex
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import asyncssh
+
 from scripthut.backends.base import JobBackend
+from scripthut.backends.slurm import SlurmBackend
 from scripthut.config_schema import (
     AgentConfig,
     EnvRule,
@@ -33,8 +38,10 @@ from scripthut.runs.models import (
     TaskDefinition,
     TaskOutput,
 )
+from scripthut.runs.submission import SubmissionManager
 from scripthut.sources.git import is_safe_branch_name
-from scripthut.ssh.transport import ExecutionClient
+from scripthut.ssh.transport import ExecutionClient, TransportError
+from scripthut.submission import SubmissionConflict
 
 if TYPE_CHECKING:
     from scripthut.runs.storage import RunStorageManager
@@ -135,6 +142,10 @@ class RunManager:
         job_backends: dict[str, JobBackend] | None = None,
     ) -> None:
         """Initialize with config, SSH backends, and optional persistent storage."""
+        self.submissions = SubmissionManager(self)
+        self.available: Callable[[str], bool] = lambda name: (
+            name not in self.backends or self.backends[name].is_connected
+        )
         self.config = config
         self.backends = backends
         self.runs: dict[str, Run] = {}
@@ -1450,6 +1461,8 @@ class RunManager:
         if run is None:
             raise ValueError(f"Run '{run_id}' not found")
 
+        if run.submission_unresolved:
+            raise SubmissionConflict("Resolve unknown submissions before rerunning")
         if run.status in (RunStatus.RUNNING, RunStatus.PENDING):
             raise ValueError("Cannot rerun a run that is still active")
 
@@ -1756,7 +1769,46 @@ class RunManager:
                 f"cache: storing outputs for '{task.id}' failed: {e}"
             )
 
-    async def submit_task(self, run: Run, item: RunItem) -> bool:
+    async def create_debug_run(self, run: Run, item: RunItem) -> Run:
+        async with self.submissions.lock(run):
+            if run.submission_unresolved:
+                raise SubmissionConflict("Resolve the original run's unknown submission first")
+            source = f"{run.id}/{item.task.id}"
+            debug = next((r for r in self.runs.values() if r.debug_source == source
+                          and r.status in (RunStatus.PENDING, RunStatus.RUNNING)), None)
+            if debug is None:
+                debug = replace(
+                    run, id=uuid.uuid4().hex[:12], created_at=datetime.now(UTC),
+                    items=[RunItem(task=replace(item.task, dependencies=[]))],
+                    interactive_wait=True, debug_source=source, max_concurrent=1,
+                    agent_session=False, agent_mode=None, agent_session_name=None,
+                )
+                self.submissions.save(debug)
+                self.runs[debug.id] = debug
+        await self.process_run(debug)
+        return debug
+
+    async def submit_task(self, run: Run, item: RunItem) -> bool | None:
+        async with self.submissions.backend_lock(run), self.submissions.lock(run):
+            if (
+                item.status != RunItemStatus.PENDING or run.submission_unresolved
+                or not self.available(run.backend_name)
+            ):
+                return None
+            if (
+                self._backend_running_count(run.backend_name)
+                >= self._get_backend_max_concurrent(run.backend_name)
+                or (run.max_concurrent is not None and run.running_count >= run.max_concurrent)
+            ):
+                return None
+            try:
+                return await self._submit_task(run, item)
+            except (OSError, asyncssh.Error, TransportError) as exc:
+                item.error = f"Submission deferred: {exc}"
+                self._persist_run(run)
+                return None
+
+    async def _submit_task(self, run: Run, item: RunItem) -> bool | None:
         """Submit a single task to the scheduler."""
         job_backend = self.get_job_backend(run.backend_name)
         if job_backend is None:
@@ -1776,7 +1828,9 @@ class RunManager:
                 stdout, _, _ = await ssh_client.run_command("echo $HOME")
                 home_dir = stdout.strip()
                 log_dir = log_dir.replace("~", home_dir, 1)
-            await ssh_client.run_command(f"mkdir -p {log_dir}")
+            _, stderr, code = await ssh_client.run_command(f"mkdir -p {shlex.quote(log_dir)}")
+            if code:
+                raise TransportError(f"Log directory preparation failed: {stderr}")
 
         # Env resolution can raise ValueError for bad config (e.g. an
         # undefined stack reference or legacy fields).  Treat that as a task
@@ -1788,6 +1842,7 @@ class RunManager:
                 item.task, run.id, log_dir,
                 account=run.account, login_shell=run.login_shell,
                 env_vars=merged_env, extra_init=extra_init,
+                **({"interactive_wait": True} if run.interactive_wait else {}),
             )
         except ValueError as e:
             item.status = RunItemStatus.FAILED
@@ -1814,10 +1869,13 @@ class RunManager:
         # Before touching the scheduler, see if a prior run already produced
         # this exact task (same command + env + commit + input hashes). On a
         # hit we restore its artifacts and mark the item COMPLETED here.
-        if await self._try_restore_from_cache(
+        if not run.interactive_wait and await self._try_restore_from_cache(
             run, item, merged_env, ssh_client, input_hashes=input_hashes,
         ):
             return True
+
+        if isinstance(job_backend, SlurmBackend):
+            return await self.submissions.submit(run, item, script, job_backend)
 
         try:
             result = await job_backend.submit_task(
@@ -1830,6 +1888,10 @@ class RunManager:
             logger.info(f"Submitted task '{item.task.id}' as job {result.job_id}")
             self._persist_run(run)
             return True
+        except (TransportError, asyncssh.Error, OSError) as e:
+            item.error = f"Submission deferred: {e}"
+            self._persist_run(run)
+            return None
         except RuntimeError as e:
             item.status = RunItemStatus.FAILED
             item.error = str(e)
@@ -1847,6 +1909,8 @@ class RunManager:
         a large run can't monopolise the backend. Pass ``fair_share=False`` for
         a greedy mop-up pass that fills slots the fair pass left idle.
         """
+        if run.submission_unresolved or not self.available(run.backend_name):
+            return
         # Cascade failures
         changed = True
         while changed:
@@ -1900,6 +1964,8 @@ class RunManager:
         cache_completed: list[RunItem] = []
         for item in to_submit:
             success = await self.submit_task(run, item)
+            if success is None:
+                break
             if not success:
                 # Submission failure (e.g. bad queue) — mark all remaining pending tasks as failed
                 for pending_item in run.items:
@@ -2030,7 +2096,7 @@ class RunManager:
         # cascade we're trying to avoid. The evidence-based sacct path
         # (in main.poll_backend) resolves those cases.
         for item in items_snapshot:
-            if item.job_id is None:
+            if item.job_id is None or item.submission_unresolved:
                 continue
 
             if item.status in (
@@ -2172,7 +2238,10 @@ class RunManager:
             if run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
                 continue
 
-            jobs = backend_jobs.get(run.backend_name, [])
+            if run.backend_name not in backend_jobs or not self.available(run.backend_name):
+                continue
+            await self.submissions.reconcile(run)
+            jobs = backend_jobs[run.backend_name]
             job_states: dict[str, JobState] = {}
             pending_reasons: dict[str, str] = {}
             for entry in jobs:
@@ -2202,6 +2271,8 @@ class RunManager:
         # capacity unused is strictly worse.
         backend_names = {run.backend_name for run in self.runs.values()}
         for backend_name in sorted(backend_names):
+            if backend_name not in backend_jobs:
+                continue
             for run in self._contending_runs(backend_name):
                 await self.process_run(run)
             for run in self._contending_runs(backend_name):
@@ -2209,12 +2280,23 @@ class RunManager:
 
     def _has_submittable_items(self, run: Run) -> bool:
         """True if the run has PENDING items whose dependencies are satisfied."""
-        return any(
+        return not run.submission_unresolved and any(
             item.status == RunItemStatus.PENDING and run.are_deps_satisfied(item)
             for item in run.items
         )
 
     async def cancel_run(self, run_id: str) -> bool:
+        run = self.runs.get(run_id)
+        if run is None:
+            return False
+        async with self.submissions.lock(run):
+            if run.submission_unresolved:
+                raise SubmissionConflict("Resolve unknown submissions before cancelling this run")
+            if not self.available(run.backend_name):
+                raise SubmissionConflict("Backend unavailable; cancellation was not sent")
+            return await self._cancel_run(run_id)
+
+    async def _cancel_run(self, run_id: str) -> bool:
         """Cancel all pending and running items in a run."""
         run = self.runs.get(run_id)
         if run is None:
@@ -2307,19 +2389,24 @@ class RunManager:
             return 0
 
         all_runs = self.storage.load_all_runs()
+        # Load every run before driving any of them so recovered slots count.
         for run_id, run in all_runs.items():
-            if run.workflow_name == "_default":
-                continue  # Don't load default runs into active management
-            if run_id not in self.runs:
+            if run.workflow_name != "_default" and run_id not in self.runs:
                 self.runs[run_id] = run
-                if run.status in (RunStatus.PENDING, RunStatus.RUNNING):
-                    try:
-                        await self.process_run(run)
-                    except Exception as e:
-                        # Never let a single broken run abort server startup.
-                        logger.error(
-                            f"Failed to process run '{run_id}' during restore: {e}"
-                        )
+                for item in run.items:
+                    if item.status == RunItemStatus.SUBMITTING:
+                        item.status = RunItemStatus.SUBMISSION_UNKNOWN
+                        item.error = "Controller stopped during submission; reconciliation required"
+        for run in list(self.runs.values()):
+            if self.available(run.backend_name):
+                await self.submissions.reconcile(run)
+        for run in list(self.runs.values()):
+            if run.status not in (RunStatus.PENDING, RunStatus.RUNNING):
+                continue
+            try:
+                await self.process_run(run)
+            except Exception as exc:
+                logger.error(f"Failed to process run '{run.id}' during restore: {exc}")
 
         logger.info(f"Restored {len(self.runs)} runs from storage")
         return len(self.runs)

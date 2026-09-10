@@ -572,11 +572,11 @@ master on a POSIX host. AsyncSSH remains the default. The controller never start
 or stops the master, and socket failure cannot trigger a fresh SSH connection.
 This is useful for clusters requiring interactive authentication.
 
-**Development status:** the transport is implemented, but remote submissions
-must wait for the disconnection/reconciliation work in Phase 3 of the
-[implementation roadmap](../design/openssh-socket-implementation.md). Phase 2
-provides transport and health checks; it does not yet make scheduler recovery
-safe after an uncertain submission response.
+**Development status:** Slurm submissions now persist intent before `sbatch` and
+recover uncertain responses through queue/accounting reconciliation (Phase 3).
+Browser-assisted login is a later phase; create the master externally as below.
+PBS uses the transport but does not have Slurm's durable attempt recovery.
+See [submission recovery](#slurm-submission-recovery) before operating this mode.
 
 ```yaml
 backends:
@@ -645,3 +645,63 @@ failing proxy command. They never retry a command automatically. SSH exit 255
 is conservatively reported as a transport error, even though a remote command
 can itself return 255. Timeouts/cancellation close and reap the controller's
 child process; that does not prove a remote command had no side effects.
+
+
+## Slurm submission recovery
+
+Both SSH transports use durable submission records for controller-managed Slurm
+jobs, including CLI submissions and interactive debug jobs. The state directory
+must support atomic replacement and file fsync; POSIX hosts also require directory
+fsync. If intent cannot be saved, no `sbatch` command is sent.
+
+A task enters `submitting` before the remote command. A lost response, failed
+verification, interrupted controller, or failed persistence leaves
+`submission_unknown`. Its run pauses, its dependencies remain blocked, and it
+continues to consume a concurrency slot. Other healthy runs can use free slots.
+Disconnected backends defer pending work. Failed polls retain display data but
+cannot drive scheduling or missing-job transitions.
+
+Each attempt has a unique `--sh-<UUID>` suffix in the Slurm job name. Reconciliation
+queries both the local cluster's queue and accounting, with the original user,
+exact name, and an accounting start time five minutes before the attempt. One
+consistent matching allocation is adopted. Empty results, delayed accounting,
+multiple matches, changed destination/user, and query errors leave it unknown.
+The configured account must be able to query its own jobs using both `squeue`
+and `sacct`. Returned job IDs are saved before these queries.
+
+Open the run's task list to inspect submission history and use **Check scheduler**,
+**Verify and bind ID**, or **Authorize retry**. Cancel, delete, and rerun cannot
+discard unresolved attempts. Debug submissions have their own persisted run;
+reopening an active debug submission reuses that run.
+
+The same actions are available through the CLI (get the attempt ID from
+`run view RUN --json`):
+
+```sh
+scripthut run resolve RUN TASK --attempt ATTEMPT --action check
+scripthut run resolve RUN TASK --attempt ATTEMPT --action bind --job-id 12345
+scripthut run resolve RUN TASK --attempt ATTEMPT --action retry --confirm-not-submitted
+```
+
+Use your normal remote-server CLI options when a controller owns the state. Do
+not run an independent local CLI process against a running controller's state
+directory: state ownership remains single-controller, without cross-process locks.
+
+The API action is `POST /api/v1/runs/RUN/tasks/TASK/submission`, with JSON fields
+`attempt_id`, `action`, optional `job_id`, and `confirm_not_submitted` (default
+false). A stale attempt or contradictory evidence returns HTTP 409. Run views
+include the full `submission_attempts` history.
+
+Retry is an explicit operator declaration that the previous attempt submitted no
+job, including when you verified that fact outside scripthut. Query failure or
+absence alone never authorizes retry. Positive matches block retry; use check or
+bind. If retry is authorized, the previous record (including any returned ID) is
+retained and the next submission gets a new marker. A mistaken declaration can
+create a duplicate job.
+
+**Rollback:** existing version-2 state loads automatically. Runs with attempt
+history or debug submission metadata use version 3. Older controllers do not
+understand the new states and can skip these runs or drop evidence when saving.
+Do not downgrade against a state directory containing version-3 runs. Resolve
+and finish those runs with this version, stop the controller, and archive the
+state before any downgrade; never use an old snapshot to resume uncertain jobs.

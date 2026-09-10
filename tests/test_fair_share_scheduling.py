@@ -92,7 +92,9 @@ class TestFairShare:
         mgr.runs = {"BIG": big, "SMALL": small}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         assert _count(big, RunItemStatus.SUBMITTED) == 5
         assert _count(small, RunItemStatus.SUBMITTED) == 5
@@ -110,7 +112,9 @@ class TestFairShare:
         mgr.runs = {"BIG": big, "SMALL": small}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         # 2 free slots, 2 contenders -> 1 each on the fair pass. SMALL is
         # ordered first (running_count 0 vs 8), so it is not shut out by the
@@ -129,7 +133,9 @@ class TestFairShare:
         mgr.runs = {"BIG": big, "SMALL": small}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         assert _count(small, RunItemStatus.SUBMITTED) == 1
         assert _count(big, RunItemStatus.SUBMITTED) == 9
@@ -150,7 +156,9 @@ class TestFairShare:
         mgr.runs = runs
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         submitted = sum(_count(r, RunItemStatus.SUBMITTED) for r in runs.values())
         assert submitted == 2, "only the 2 genuinely free slots may be used"
@@ -163,7 +171,9 @@ class TestFairShare:
         mgr.runs = {"ONLY": only}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         assert _count(only, RunItemStatus.SUBMITTED) == 10
 
@@ -178,7 +188,9 @@ class TestFairShare:
         mgr.runs = {"HOLD": holder, "NEWER": newer, "OLDER": older}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         assert _count(older, RunItemStatus.SUBMITTED) == 1
         assert _count(newer, RunItemStatus.SUBMITTED) == 0
@@ -192,7 +204,9 @@ class TestFairShare:
         mgr.runs = {"A": a, "B": b}
         _stub_submit(mgr)
 
-        await mgr.update_all_runs(backend_jobs={})
+        await mgr.update_all_runs(
+            backend_jobs={name: [] for name in {r.backend_name for r in mgr.runs.values()}}
+        )
 
         # Each is the sole contender on its own backend.
         assert _count(a, RunItemStatus.SUBMITTED) == 4

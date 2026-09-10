@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from scripthut.config_schema import EnvRule, Stack
+from scripthut.submission import SubmissionAttempt
 
 
 @dataclass
@@ -62,6 +63,8 @@ class RunItemStatus(str, Enum):
     """
 
     PENDING = "pending"           # Waiting to be submitted
+    SUBMITTING = "submitting"     # Durable attempt exists; sbatch may be executing
+    SUBMISSION_UNKNOWN = "submission_unknown"  # Requires positive scheduler evidence or user action
     SUBMITTED = "submitted"       # sbatch returned; not yet observed in squeue
     QUEUED = "queued"             # Observed in squeue (PENDING); awaiting resources
     RUNNING = "running"           # Currently running
@@ -324,6 +327,7 @@ class RunItem:
     task: TaskDefinition
     status: RunItemStatus = RunItemStatus.PENDING
     job_id: str | None = None  # Scheduler-assigned job ID
+    submission_attempts: list[SubmissionAttempt] = field(default_factory=list)
     # Owning username as reported by the scheduler (squeue %u / qstat).
     # Set for external jobs (which may belong to any cluster user); None
     # for scripthut-submitted items, which belong to the configured user.
@@ -384,6 +388,7 @@ class RunItem:
             "task": self.task.to_dict(),
             "status": self.status.value,
             "job_id": self.job_id,
+            "submission_attempts": [attempt.to_dict() for attempt in self.submission_attempts],
             "user": self.user,
             "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -420,6 +425,9 @@ class RunItem:
             task=TaskDefinition.from_dict(data["task"]),
             status=RunItemStatus(data["status"]),
             job_id=data.get("job_id") or data.get("slurm_job_id"),
+            submission_attempts=[
+                SubmissionAttempt.from_dict(a) for a in data.get("submission_attempts", [])
+            ],
             user=data.get("user"),
             submitted_at=parse_dt(data.get("submitted_at")),
             started_at=parse_dt(data.get("started_at")),
@@ -441,10 +449,16 @@ class RunItem:
         )
 
     @property
+    def submission_unresolved(self) -> bool:
+        return self.status in (RunItemStatus.SUBMITTING, RunItemStatus.SUBMISSION_UNKNOWN)
+
+    @property
     def status_class(self) -> str:
         """Return CSS class for status styling."""
         status_classes = {
             RunItemStatus.PENDING: "text-gray-500",
+            RunItemStatus.SUBMITTING: "text-yellow-600",
+            RunItemStatus.SUBMISSION_UNKNOWN: "text-orange-600",
             # SUBMITTED is intentionally dimmer than QUEUED — it
             # signals "we don't have positive evidence the scheduler
             # has this yet"; QUEUED says "scheduler has it, waiting
@@ -512,6 +526,8 @@ class Run:
     log_dir: str = ""  # Directory for log files on the remote backend
     account: str | None = None  # Slurm account to charge jobs to
     login_shell: bool = False  # Use #!/bin/bash -l shebang
+    interactive_wait: bool = False
+    debug_source: str | None = None
     commit_hash: str | None = None  # Git commit hash if run from a git workflow
     git_repo: str | None = None  # Git repo URL if run from a git workflow or git source
     git_branch: str | None = None  # Git branch if run from a git workflow or git source
@@ -537,6 +553,10 @@ class Run:
     agent_session: bool = False
     agent_mode: str | None = None
     agent_session_name: str | None = None
+
+    @property
+    def submission_unresolved(self) -> bool:
+        return any(item.submission_unresolved for item in self.items)
 
     @property
     def status(self) -> RunStatus:
@@ -570,6 +590,7 @@ class Run:
             s in (
                 RunItemStatus.RUNNING, RunItemStatus.QUEUED,
                 RunItemStatus.SUBMITTED, RunItemStatus.SETTLING,
+                RunItemStatus.SUBMITTING, RunItemStatus.SUBMISSION_UNKNOWN,
             )
             for s in statuses
         ):
@@ -634,6 +655,8 @@ class Run:
                 RunItemStatus.RUNNING,
                 RunItemStatus.QUEUED,
                 RunItemStatus.SUBMITTED,
+                RunItemStatus.SUBMITTING,
+                RunItemStatus.SUBMISSION_UNKNOWN,
                 RunItemStatus.SETTLING,
             )
         )

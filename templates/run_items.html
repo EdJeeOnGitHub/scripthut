@@ -4,6 +4,25 @@
     <h2 class="text-xl font-semibold text-gray-800">Tasks</h2>
     <span class="text-sm text-gray-600">{{ run.items|length }} total</span>
 </div>
+{% for item in run.items if item.submission_attempts %}
+<details class="p-4 border-b border-orange-200" {% if item.submission_unresolved %}open{% endif %}>
+    <summary>{{ item.task.id }} — submission history{% if item.submission_unresolved %} (resolution required){% endif %}</summary>
+    {% for attempt in item.submission_attempts %}
+    <p class="text-sm break-all">{{ attempt.created_at.isoformat() }} · {{ attempt.id }} · {{ attempt.resolution }} · job {{ attempt.job_id or 'unknown' }}<br>{{ attempt.scheduler_name }} · {{ attempt.user }} · {{ attempt.destination }}<br>{{ attempt.detail or '' }}</p>
+    {% endfor %}
+    {% if item.submission_unresolved %}
+    <p class="text-sm my-2">This run is paused. A lost response may hide an accepted job. Check the scheduler before authorizing another submission.</p>
+    <form data-submission-resolution data-run="{{ run.id }}" data-task="{{ item.task.id }}" data-attempt="{{ item.submission_attempts[-1].id }}" class="flex flex-wrap gap-2 items-center">
+        <button name="action" value="check" class="border rounded px-2 py-1">Check scheduler</button>
+        <input name="job_id" aria-label="Slurm job ID" placeholder="Slurm job ID" pattern="[0-9]+" class="border rounded px-2 py-1">
+        <button name="action" value="bind" class="border rounded px-2 py-1">Verify and bind ID</button>
+        <label class="text-sm"><input name="confirm_not_submitted" type="checkbox"> I verified that this attempt submitted no job</label>
+        <button name="action" value="retry" class="border rounded px-2 py-1">Authorize retry</button>
+        <span role="status" class="text-sm text-orange-700"></span>
+    </form>
+    {% endif %}
+</details>
+{% endfor %}
 <!-- Tasks Table (desktop) -->
 <div class="hidden md:block overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">

@@ -65,6 +65,7 @@ class BackendState:
     status: ConnectionStatus = field(
         default_factory=lambda: ConnectionStatus(connected=False, host="")
     )
+    poll_fresh: bool = False
     enabled: bool = True
     command_log: CommandLog = field(default_factory=CommandLog)
     clone_dir: str = "~/scripthut-repos"
@@ -361,6 +362,12 @@ async def init_runtime(
     run_manager = RunManager(
         config, ssh_clients, storage=run_storage, job_backends=job_backends,
     )
+    def available(name: str) -> bool:
+        bs = backends.get(name)
+        return bool(bs and bs.enabled and bs.status.connected
+                    and (bs.ssh_client is None or bs.ssh_client.is_connected))
+
+    run_manager.available = available
     logger.info(
         f"Initialized run manager with {len(config.sources)} sources"
     )
