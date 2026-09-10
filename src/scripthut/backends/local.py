@@ -52,6 +52,7 @@ from scripthut.backends.base import (
     SubmitResult,
 )
 from scripthut.backends.utils import generate_script_body
+from scripthut.identity import local_user
 from scripthut.models import HPCJob, JobState
 
 if TYPE_CHECKING:
@@ -174,6 +175,7 @@ class LocalBackend(JobBackend):
     """Run tasks as detached local subprocesses with spool-backed accounting."""
 
     def __init__(self, backend_name: str, spool_dir: Path) -> None:
+        self.current_user = local_user()
         self._name = backend_name
         self._spool = spool_dir
         self._spool.mkdir(parents=True, exist_ok=True)
@@ -303,6 +305,8 @@ class LocalBackend(JobBackend):
         "gone" — and the real verdict comes from :meth:`get_job_stats`,
         exactly like the Slurm SETTLING → sacct flow.
         """
+        if user is not None and user != self.current_user:
+            return []
         now = time.time()
         jobs: list[HPCJob] = []
         for meta_path in sorted(self._spool.glob("*.json")):
@@ -332,7 +336,7 @@ class LocalBackend(JobBackend):
             jobs.append(HPCJob(
                 job_id=job_id,
                 name=meta.get("name") or job_id,
-                user=user or os.environ.get("USER", "local"),
+                user=self.current_user,
                 state=state,
                 partition="local",
                 time_used="",

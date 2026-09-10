@@ -140,12 +140,14 @@ class RunManager:
         backends: dict[str, ExecutionClient],
         storage: RunStorageManager | None = None,
         job_backends: dict[str, JobBackend] | None = None,
+        backend_users: dict[str, str | None] | None = None,
     ) -> None:
         """Initialize with config, SSH backends, and optional persistent storage."""
         self.submissions = SubmissionManager(self)
         self.available: Callable[[str], bool] = lambda name: (
             name not in self.backends or self.backends[name].is_connected
         )
+        self.backend_users = backend_users if backend_users is not None else {}
         self.config = config
         self.backends = backends
         self.runs: dict[str, Run] = {}
@@ -340,7 +342,9 @@ class RunManager:
                     )
                     return
 
-        new_items = [RunItem(task=t) for t in new_tasks]
+        new_items = [
+            RunItem(task=t, user=self.backend_users.get(run.backend_name)) for t in new_tasks
+        ]
         run.items.extend(new_items)
         self._persist_run(run)
 
@@ -737,7 +741,7 @@ class RunManager:
             workflow_name=workflow_name,
             backend_name=backend_name,
             created_at=datetime.now(timezone.utc),
-            items=[RunItem(task=task) for task in tasks],
+            items=[RunItem(task=task, user=self.backend_users.get(backend_name)) for task in tasks],
             max_concurrent=max_concurrent,
             account=account,
             login_shell=login_shell,
@@ -1779,7 +1783,7 @@ class RunManager:
             if debug is None:
                 debug = replace(
                     run, id=uuid.uuid4().hex[:12], created_at=datetime.now(UTC),
-                    items=[RunItem(task=replace(item.task, dependencies=[]))],
+                    items=[RunItem(task=replace(item.task, dependencies=[]), user=item.user)],
                     interactive_wait=True, debug_source=source, max_concurrent=1,
                     agent_session=False, agent_mode=None, agent_session_name=None,
                 )

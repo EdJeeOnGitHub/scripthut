@@ -49,7 +49,7 @@ You can short-circuit discovery for one command with `--config <path>` — that 
 | `projects` | yes | yes |
 | `env`, `env_groups` | yes | yes |
 
-The four "no" rows are deliberate. They describe infrastructure that's specific to the **user's machine and identity** (SSH keys, server bindings, AWS profiles, the user's `filter_user` for the UI) — not portable facts about a project. If a project-local file tries to declare any of them, ScriptHut refuses to load it with an error pointing at the offending fields:
+The four "no" rows are deliberate. They describe infrastructure that's specific to the **user's machine and identity** (SSH keys, server bindings, AWS profiles, the default `my_jobs_only` view) — not portable facts about a project. If a project-local file tries to declare any of them, ScriptHut refuses to load it with an error pointing at the offending fields:
 
 ```
 ConfigError: Project-local config '/home/me/repo/scripthut.yaml' contains
@@ -103,7 +103,7 @@ backends:
       key_path: ~/.ssh/id_ed25519
 
 settings:
-  filter_user: me
+  my_jobs_only: true
   poll_interval: 30
   cli_server: "http://127.0.0.1:8082"  # if you run a local server
 

@@ -13,7 +13,7 @@
             </svg>
             {% if live_view %}Live{% else %}All{% endif %}
         </button>
-        {% if filter_user %}
+        {% if filter_available %}
         <button hx-post="/filter/toggle" hx-target="#jobs-section" hx-swap="innerHTML"
             class="px-3 py-1.5 text-sm font-medium rounded-full transition-colors flex items-center gap-2 {% if filter_enabled %}bg-blue-600 text-white hover:bg-blue-700{% else %}bg-gray-200 text-gray-700 hover:bg-gray-300{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -276,8 +276,8 @@
     </svg>
     <h3 class="mt-2 text-sm font-medium text-gray-900">No jobs found</h3>
     <p class="mt-1 text-sm text-gray-500">
-        {% if filter_enabled and filter_user %}
-        No jobs found for user "{{ filter_user }}". Try showing all users.
+        {% if filter_enabled and filter_available %}
+        No jobs found for your backend accounts. Try showing all users.
         {% elif status.connected %}
         No jobs are currently tracked. Submit a run or wait for polling to detect existing jobs.
         {% else %}
