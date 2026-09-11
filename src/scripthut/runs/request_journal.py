@@ -29,11 +29,12 @@ class RequestJournal:
                 run_id TEXT NOT NULL UNIQUE, phase TEXT NOT NULL,
                 retain INTEGER NOT NULL, archive_receipt TEXT)''')
         os.chmod(self.database, 0o600)
-        fd = os.open(self.root, os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        for directory in (self.root, self.root.parent):
+            fd = os.open(directory, os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     @contextmanager
     def connect(self):
