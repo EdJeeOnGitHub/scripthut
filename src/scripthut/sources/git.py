@@ -29,6 +29,11 @@ def is_safe_branch_name(branch: str) -> bool:
     )
 
 
+def is_commit_sha(value: str) -> bool:
+    """Accept a full Git SHA-1 object ID, never a ref expression or short prefix."""
+    return re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
 def _match_workflows_glob(path: str, pattern: str) -> bool:
     """Match a repo-relative posix path against a workflows glob.
 
@@ -319,26 +324,38 @@ class GitSourceManager:
                     f"Source '{name}' could not be cloned: {status.error}"
                 )
 
-        _, stderr, code = await self._run_git(
-            ["fetch", "origin", f"refs/heads/{branch}"],
-            cwd=status.path,
+        stdout, stderr, code = await self._run_git(
+            ["ls-remote", source.url, f"refs/heads/{branch}"],
             deploy_key=source.deploy_key_resolved,
         )
-        if code != 0:
-            raise ValueError(
-                f"Failed to fetch branch '{branch}' for source '{name}': "
-                f"{stderr or 'fetch failed'}"
-            )
+        if code or not stdout:
+            raise ValueError(f"Failed to fetch branch '{branch}': {stderr or 'branch not found'}")
+        return await self.fetch_commit(name, stdout.split()[0])
 
-        stdout, stderr, code = await self._run_git(
-            ["rev-parse", "FETCH_HEAD"], cwd=status.path,
+    async def fetch_commit(self, name: str, commit: str) -> str:
+        """Fetch and verify an exact commit without reading shared FETCH_HEAD."""
+        if not is_commit_sha(commit):
+            raise ValueError("commit must be a full lowercase 40-character SHA")
+        if name not in self._sources:
+            raise ValueError(f"Unknown source: {name}")
+        source = self._sources[name]
+        status = self._statuses[name]
+        if not status.cloned or not status.path.exists():
+            status = await self.clone_source(name)
+            if not status.cloned:
+                raise ValueError(f"Source '{name}' could not be cloned: {status.error}")
+        _, stderr, code = await self._run_git(
+            ["fetch", "--no-write-fetch-head", "origin", commit], cwd=status.path,
+            deploy_key=source.deploy_key_resolved,
         )
-        if code != 0 or not stdout:
-            raise ValueError(
-                f"Failed to resolve branch '{branch}' for source '{name}': "
-                f"{stderr or 'rev-parse failed'}"
-            )
-        return stdout
+        if code:
+            raise ValueError(f"Failed to fetch commit '{commit}': {stderr}")
+        stdout, stderr, code = await self._run_git(
+            ["rev-parse", "--verify", commit + "^{commit}"], cwd=status.path,
+        )
+        if code or stdout != commit:
+            raise ValueError(f"Fetched object is not the requested commit '{commit}': {stderr}")
+        return commit
 
     def get_status(self, name: str) -> SourceStatus | None:
         """Get the status of a source."""

@@ -252,15 +252,15 @@ class TestRunEndpointBranchOverride:
         sm.discover_workflows_at.assert_awaited_once_with("src", "a" * 40)
         state.run_manager.create_run_from_source.assert_awaited_once_with(
             "src", "train.json", '{"tasks": []}', backend="cluster",
-            branch="feature",
+            branch="feature", commit_hash="a" * 40,
         )
 
-    def test_branch_equal_to_configured_uses_cached_path(self):
+    def test_branch_equal_to_configured_resolves_once(self):
         wf = SourceWorkflow(
             name="src/train", source_name="src", filename="train.json",
             tasks_json="[]",
         )
-        sm = _branch_source_manager([])
+        sm = _branch_source_manager([wf])
         sm.sync_source = AsyncMock()
         sm.discover_workflows = MagicMock(return_value=[wf])
         state = _make_state(
@@ -274,9 +274,9 @@ class TestRunEndpointBranchOverride:
         )
 
         assert resp.status_code == 200
-        sm.fetch_branch.assert_not_awaited()
+        sm.fetch_branch.assert_awaited_once_with("src", "main")
         state.run_manager.create_run_from_source.assert_awaited_once_with(
-            "src", "train.json", "[]", backend="cluster", branch=None,
+            "src", "train.json", "[]", backend="cluster", branch="main", commit_hash="a" * 40,
         )
 
     def test_branch_on_path_source_is_422(self):

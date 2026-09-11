@@ -39,7 +39,7 @@ from scripthut.runs.models import (
     TaskOutput,
 )
 from scripthut.runs.submission import SubmissionManager
-from scripthut.sources.git import is_safe_branch_name
+from scripthut.sources.git import is_commit_sha, is_safe_branch_name
 from scripthut.ssh.transport import ExecutionClient, TransportError
 from scripthut.submission import SubmissionConflict
 
@@ -678,6 +678,53 @@ class RunManager:
             if remote_key is not None:
                 await self._cleanup_deploy_key(ssh_client, remote_key)
 
+    async def _clone_pinned_source(
+        self, ssh_client: ExecutionClient, source: GitSourceConfig, commit: str,
+    ) -> tuple[str, str]:
+        """Prepare an isolated detached checkout; never reuse a job-writable tree."""
+        if not is_commit_sha(commit):
+            raise ValueError("commit must be a full lowercase 40-character SHA")
+        root = source.clone_dir
+        if root == "~" or root.startswith("~/"):
+            home, error, code = await ssh_client.run_command('printf "%s" "$HOME"')
+            if code or not home.startswith('/'):
+                raise ValueError(f"Cannot resolve backend home: {error}")
+            root = home.rstrip('/') + root[1:]
+        workspace = f"{root}/runs/{commit}-{uuid.uuid4().hex}"
+        remote_key = None
+        try:
+            if source.deploy_key is not None:
+                remote_key = await self._upload_deploy_key(ssh_client, source.deploy_key.expanduser())
+            git_ssh = self._build_remote_git_ssh_command(remote_key)
+            repo = source.url if remote_key else self._to_https_url(source.url)
+            q = shlex.quote
+            command = (
+                f"set -eu; mkdir -p {q(root + '/runs')}; mkdir {q(workspace)}; "
+                f"git init --quiet {q(workspace)}; "
+                f"git -C {q(workspace)} remote add origin {q(repo)}; "
+                f"{git_ssh}GIT_TERMINAL_PROMPT=0 git -C {q(workspace)} fetch --no-tags --depth 1 origin {commit}; "
+                f"git -C {q(workspace)} checkout --quiet --detach {commit}"
+            )
+            _, error, code = await ssh_client.run_command(command, timeout=300)
+            if code:
+                raise ValueError(f"Pinned source checkout failed: {error}")
+            if source.postclone:
+                _, error, code = await ssh_client.run_command(
+                    f"cd {q(workspace)} && {source.postclone}", timeout=300,
+                )
+                if code:
+                    raise ValueError(f"Postclone command failed: {error}")
+            head, error, code = await ssh_client.run_command(
+                f"git -C {q(workspace)} rev-parse --verify HEAD && "
+                f"git -C {q(workspace)} diff --quiet HEAD --", timeout=30,
+            )
+            if code or head.strip() != commit:
+                raise ValueError("Prepared checkout differs from the requested commit (HEAD or tracked files changed)")
+            return workspace, commit
+        finally:
+            if remote_key is not None:
+                await self._cleanup_deploy_key(ssh_client, remote_key)
+
     def get_backend_account(self, backend_name: str) -> str | None:
         """Get the account for a backend (Slurm --account, PBS -A, etc.)."""
         backend = self.config.get_backend(backend_name)
@@ -1113,7 +1160,7 @@ class RunManager:
 
     async def create_run_from_source(
         self, source_name: str, workflow_filename: str, tasks_json: str,
-        backend: str, branch: str | None = None,
+        backend: str, branch: str | None = None, commit_hash: str | None = None,
     ) -> Run:
         """Create a run from a source workflow's JSON task list.
 
@@ -1132,7 +1179,10 @@ class RunManager:
                 configured branch. Only valid for git sources. The
                 caller is responsible for ``tasks_json`` matching this
                 branch (the API fetches + discovers at the branch first).
+            commit_hash: Full resolved SHA. The HTTP API reads tasks_json at
+                this same commit; SSH backends prepare a fresh verified tree.
         """
+        requested_commit = commit_hash
         source = self.config.get_source(source_name)
         if source is None:
             raise ValueError(f"Source '{source_name}' not found")
@@ -1150,6 +1200,10 @@ class RunManager:
             # so a shallow copy with the override is all it takes.
             source = source.model_copy(update={"branch": branch})
 
+        if commit_hash is not None:
+            if not isinstance(source, GitSourceConfig) or not is_commit_sha(commit_hash):
+                raise ValueError("A full commit SHA requires a git source")
+
         backend_name = backend
         ssh_client = self.get_ssh_client(backend_name)
         job_backend = self.get_job_backend(backend_name)
@@ -1163,21 +1217,22 @@ class RunManager:
         tasks, doc_env, doc_env_groups = self._parse_tasks_json(tasks_json, label)
 
         clone_dir: str | None = None
-        commit_hash: str | None = None
 
         if isinstance(source, GitSourceConfig):
             if ssh_client is not None:
                 # SSH backend: clone on the backend filesystem now.
-                clone_dir, commit_hash = await self._clone_source_repo(
-                    ssh_client, source
-                )
+                if commit_hash is not None:
+                    clone_dir, commit_hash = await self._clone_pinned_source(ssh_client, source, commit_hash)
+                else:
+                    clone_dir, commit_hash = await self._clone_source_repo(ssh_client, source)
                 self._resolve_working_dirs(tasks, clone_dir)
             else:
                 # API-only backend: resolve the commit locally so the
                 # container can check out the same ref at runtime.  Don't
                 # touch tasks.working_dir — the backend's generate_script
                 # rewrites relative paths against $_SCRIPTHUT_CLONE_DIR.
-                commit_hash = await self._ls_remote_commit(source.url, source.branch)
+                if commit_hash is None:
+                    commit_hash = await self._ls_remote_commit(source.url, source.branch)
         elif isinstance(source, PathSourceConfig):
             if ssh_client is None:
                 raise ValueError(
@@ -1213,7 +1268,7 @@ class RunManager:
             doc_stacks = {s.name: s for s in project_cfg.stacks}
 
         git_repo = source.url if isinstance(source, GitSourceConfig) else None
-        git_branch = source.branch if isinstance(source, GitSourceConfig) else None
+        git_branch = (branch or (source.branch if requested_commit is None else None)) if isinstance(source, GitSourceConfig) else None
         run = await self._build_run(
             tasks, workflow_name, backend_name, None, ssh_client,
             git_repo=git_repo, git_branch=git_branch, commit_hash=commit_hash,

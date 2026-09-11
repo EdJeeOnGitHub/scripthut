@@ -67,6 +67,7 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "id": run.id,
         "workflow_name": run.workflow_name,
         "source_name": run.source_name,
+        "commit_hash": run.commit_hash,
         "backend_name": run.backend_name,
         "created_at": run.created_at.isoformat(),
         "status": run.status.value,
@@ -396,20 +397,20 @@ def make_api_router(state: AppState) -> APIRouter:
     @router.post("/sources/{name}/run")
     async def run_source_workflow_v1(
         name: str, workflow: str, backend: str | None = None,
-        branch: str | None = None,
+        branch: str | None = None, commit: str | None = None,
     ) -> dict[str, Any]:
         """Submit a source workflow as a new run.
 
         ``workflow`` is the filename within the source (e.g. ``train.json``).
         ``backend`` falls back to the source's own ``backend`` field when
         omitted — required because ``create_run_from_source`` needs one.
-        ``branch`` (git sources only) runs the workflow from that branch
-        instead of the source's configured one: the branch is fetched
-        into the server's clone on demand and both the workflow JSON and
-        the ``scripthut.yaml`` overlay are read at its tip.
+        Git sources resolve a branch once or fetch an exact commit. Workflow
+        discovery, project configuration and backend preparation use that same
+        full SHA. Exact clients use the distinct run-commit route below so an
+        older server cannot ignore the requested revision.
         """
         from scripthut.config_schema import GitSourceConfig
-        from scripthut.sources.git import is_safe_branch_name
+        from scripthut.sources.git import is_commit_sha, is_safe_branch_name
 
         if state.config is None:
             raise HTTPException(status_code=503, detail="Config not loaded")
@@ -426,75 +427,40 @@ def make_api_router(state: AppState) -> APIRouter:
                 ),
             )
 
-        # A branch equal to the configured one is a no-op override; drop
-        # it so the normal cached-discovery path below handles the run.
-        if branch is not None and branch == getattr(source, "branch", None):
-            branch = None
-
-        # Fetch the workflow JSON. Git sources need a refresh first so we
-        # don't run against a stale clone; a branch override instead
-        # fetches that branch and discovers workflows at its tip (the
-        # cached default-branch discovery is left untouched).
-        wf = None
-        if branch is not None:
-            if not isinstance(source, GitSourceConfig):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Source '{name}' is not a git source; ?branch= "
-                        "only applies to git sources."
-                    ),
-                )
-            if not is_safe_branch_name(branch):
-                raise HTTPException(
-                    status_code=422, detail=f"Invalid branch name: {branch!r}",
-                )
+        if branch is not None and commit is not None:
+            raise HTTPException(status_code=422, detail="Choose either branch or commit, not both")
+        if (branch is not None or commit is not None) and not isinstance(source, GitSourceConfig):
+            raise HTTPException(status_code=422, detail="branch/commit only apply to a git source")
+        resolved_commit = None
+        if isinstance(source, GitSourceConfig):
+            if commit is not None and not is_commit_sha(commit):
+                raise HTTPException(status_code=422, detail="commit must be a full lowercase 40-character SHA")
+            selected_branch = branch or source.branch
+            if commit is None and not is_safe_branch_name(selected_branch):
+                raise HTTPException(status_code=422, detail=f"Invalid branch name: {selected_branch!r}")
             sm = state.source_manager
             if sm is None or name not in getattr(sm, "_sources", {}):
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Source manager not available for '{name}'",
-                )
+                raise HTTPException(status_code=503, detail=f"Source manager not available for '{name}'")
             try:
-                commit = await sm.fetch_branch(name, branch)
-                branch_workflows = await sm.discover_workflows_at(name, commit)
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e))
-            wf = next(
-                (w for w in branch_workflows if w.filename == workflow), None,
-            )
+                resolved_commit = (await sm.fetch_commit(name, commit) if commit is not None
+                                   else await sm.fetch_branch(name, selected_branch))
+                workflows = await sm.discover_workflows_at(name, resolved_commit)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+            wf = next((w for w in workflows if w.filename == workflow), None)
             if wf is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"Workflow '{workflow}' not found in source '{name}' "
-                        f"on branch '{branch}'"
-                    ),
-                )
+                location = f"commit '{resolved_commit}'" if commit is not None else f"branch '{selected_branch}'"
+                raise HTTPException(status_code=404, detail=f"Workflow '{workflow}' not found on {location}")
         else:
-            if state.source_manager and name in getattr(
-                state.source_manager, "_sources", {},
-            ):
-                try:
-                    await state.source_manager.sync_source(name)
-                    workflows = state.source_manager.discover_workflows(name)
-                    state.source_workflows[name] = workflows
-                except Exception as e:
-                    logger.warning(f"Failed to refresh source '{name}' before run: {e}")
-            wf = next(
-                (w for w in state.source_workflows.get(name, []) if w.filename == workflow),
-                None,
-            )
+            wf = next((w for w in state.source_workflows.get(name, []) if w.filename == workflow), None)
             if wf is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Workflow '{workflow}' not found in source '{name}'",
-                )
+                raise HTTPException(status_code=404, detail=f"Workflow '{workflow}' not found in source '{name}'")
         rm = _require_manager()
         try:
             run = await rm.create_run_from_source(
                 name, workflow, wf.tasks_json, backend=effective_backend,
-                branch=branch,
+                branch=(branch or source.branch) if isinstance(source, GitSourceConfig) and commit is None else branch,
+                **({"commit_hash": resolved_commit} if resolved_commit is not None else {}),
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -503,6 +469,15 @@ def make_api_router(state: AppState) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(e))
         state.notify_poll()
         return _run_summary(run)
+
+    @router.post("/sources/{name}/run-commit")
+    async def run_source_commit_v1(
+        name: str, workflow: str, commit: str, backend: str | None = None,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
+        # A distinct route makes old servers reject exact-commit requests rather
+        # than silently ignoring an unfamiliar query parameter and running HEAD.
+        return await run_source_workflow_v1(name, workflow, backend, branch=branch, commit=commit)
 
     @router.get("/sources/{name}/workflows")
     async def list_source_workflows_v1(name: str) -> dict[str, Any]:
