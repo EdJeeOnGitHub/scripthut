@@ -1,6 +1,6 @@
 # OpenSSH socket integration: phased implementation
 
-Date: 2026-09-10. Status: Phases 1–4 complete; Phase 5 not started.
+Date: 2026-09-10. Status: Phases 1–5 complete. Midway2 onboarding is follow-up work.
 
 ## Purpose and how to use this document
 
@@ -460,10 +460,154 @@ Julia/modules setup, and retained-results layout are separate work.
 | 2 | Complete | `9305a64` and backend-card follow-up on the same branch; validation below |
 | 3 | Complete | `b5dd8f6`; 1301 tests passed, including real master-loss recovery |
 | 4 | Complete | `feat/browser-login`; 1332 tests passed, including five Chromium tests |
-| 5 | Not started | Existing deployment facts in handoff; Serve route checked during planning |
+| 5 | Complete | Source `2f17681`; 1351 tests passed; local/Midway candidate acceptance, socket replacement, access-policy review, production promotion, and live production verification passed |
 
 Update each row with commit IDs, test results, and links to non-secret evidence
 as work completes. A phase is not complete merely because its code exists.
+
+### Phase 5 deployment evidence (2026-09-10, complete)
+
+Production runs the tested immutable local manifest
+`localhost/scripthut@sha256:55db816883bccdafbb7635a67ad4dbba106a4c3842799fd0294732778a218b98`
+with the pinned registry base and full source commit recorded below. The existing
+local/Kellogg backends, sources, and state were preserved, and Midway3 was added.
+The production socket mount and versioned helper/profile are installed.
+
+The user supplied the complete Tailscale policy, confirmed this is their personal
+tailnet, and saved the reviewed restriction replacing the wildcard source with
+their named account. All visible devices were verified to be owned by that
+account and untagged. Serve routes only HTTPS/443 to loopback port 8000; no
+Funnel route is active. Private access evidence is recorded in
+`~/.local/share/scripthut-deployments/phase5-2f17681/access-policy.json`.
+This evidence uses the reviewed policy and explicit save confirmation; a second
+identity denial probe and privileged netmap inspection were not available.
+
+Fresh production backup:
+`~/.local/share/scripthut-backups/20260911T022906.153138Z.tar.gz` (UTC).
+Promotion receipts and pre-switch config/Quadlet are retained in
+`~/.local/share/scripthut-deployments/phase5-2f17681/promotion-applied`.
+No controller state was restored or replaced during promotion.
+
+Post-promotion acceptance passed in
+`/scratch/ed/scripthut/phase5-production-20260910-213056`:
+Midway3 run `d7aaaf12` / job `58296872` and local run `5a4da38e` / job `67`
+completed with unchanged IDs across production service restart. API logs,
+downloadable files, and exactly one allocation per attempt were verified.
+Both requested one CPU and 256 MB; local Slurm allocated two logical CPUs
+because it uses CR_CORE_MEMORY with two threads per core. Audit queries now
+explicitly use UTC to match persisted attempt timestamps across local midnight.
+
+Real Chromium verified the production HTTPS login page, packaged assets,
+Secure/HttpOnly/SameSite=Strict cookie, Origin/CSRF rejection, and reservation/
+cancellation without starting another authentication. `browser.json` records
+these results beside the promotion receipt. Production local, Kellogg and
+Midway3 were healthy with no active acceptance runs after verification.
+
+Agent-infra includes preparation, promotion, and live acceptance tools plus
+`docs/scripthut-openssh-deployment.md`. The prior image is retained; rollback
+preserves current run state and never restores stale pre-submission state over
+new scheduler activity. Physical reboot remains the explicitly deferred
+maintenance-window check. The chronology below retains candidate evidence and
+harness corrections; statements about then-pending gates describe those stages.
+
+- Integrated browser login with the deployed QoS and backend ownership changes
+  by cherry-picking Phase 4 onto `74ce528`, producing `2f17681` on
+  `feat/openssh-deployment` in `/tmp/scripthut-phase5`. Combined suite:
+  **1351 passed, 1 skipped, 16 warnings** (`/tmp/phase5-integration-tests.txt`).
+- Retained production image `localhost/scripthut:0.12.20-kellogg-74ce528`,
+  immutable local manifest
+  `localhost/scripthut@sha256:1dc219b5176f295598a7b1c92d3acd5ded247e82ac47729ee5e679e3ebb095f9`.
+  Production remains on port 8000 with its existing state/configuration.
+- Private rollback archive:
+  `~/.local/share/scripthut-backups/20260910T205003.796634Z.tar.gz`.
+  Candidate build/preparation receipts are under
+  `~/.local/share/scripthut-deployments/phase5-2f17681/`.
+- Candidate source is pinned to full commit
+  `2f176819a3019fc401f01a236b5b279b6bbe31d2`; base dependency image remains
+  `ghcr.io/tlamadon/scripthut@sha256:c998c910f50eac4e6b4acc5460028b863a2bb67b2c9ad0a2af30c3ef761d52ab`.
+  Tested candidate tag is `localhost/scripthut:phase5-2f17681-r2`, local manifest
+  `localhost/scripthut@sha256:55db816883bccdafbb7635a67ad4dbba106a4c3842799fd0294732778a218b98`.
+  This is a local immutable image reference, not a published registry artifact.
+- Initial build exposed unreadable source directories under UID 1000 because
+  archive extraction inherited a private umask. The Containerfile now makes
+  source/assets readable and candidate startup gates on imports as the actual
+  keep-id runtime user. The revised image passes that gate and live incorrect
+  host-key rejection, TIMEOUT precedence, OOM, and cancellation parser checks.
+- Host helper installed as `~/.local/libexec/scripthut-ssh-login-2f17681`;
+  profiles at `~/.config/scripthut/login-profiles-2f17681.toml` use the dedicated
+  mode-0700 directory `~/.local/run/scripthut-ssh`. Existing trusted Midway host
+  keys were copied to a dedicated known-hosts file. The user's existing
+  `~/.ssh/midway3.sock` is untouched. The localhost controller key gained only
+  PTY permission, preserving its localhost restriction and disabled forwarding;
+  its pre-change authorized_keys file has a private backup in the receipt directory.
+- Candidate container `scripthut-phase5-candidate` runs as UID/GID 1000 with
+  separate state at `~/.local/share/scripthut-candidates/phase5-2f17681`, mounts
+  configuration read-only and the dedicated socket directory read/write, and
+  binds only `127.0.0.1:8001`. Tailscale Serve does not route this port.
+  Browser login accepts only `http://127.0.0.1:8001` as its origin.
+- Real Chromium login through the dedicated `acceptance-local` key/profile
+  connected successfully, cleared terminal output, and left the master alive
+  after browser closure and candidate restart. Both production backends remain
+  connected.
+- Local candidate acceptance passed in
+  `/scratch/ed/scripthut/phase5-local-20260910-160841`: success/dependencies and
+  logs/files (`6b1d273c`, jobs 59/60); exit 7 and an unsubmitted blocked dependent
+  (`fa200b06`, job 61); TIMEOUT (`98928ccb`, job 62); scheduler-confirmed CANCELLED
+  (`34f7908a`, job 63). Cancellation is represented by the existing run model as
+  a failed item with scheduler state CANCELLED and error "Cancelled".
+- Recovery workflow `d7e38a0e` retained job 65 across master loss and controller
+  restart while disconnected. Its dependent stayed pending without a job ID;
+  after browser-assisted socket replacement it completed as job 66. Accounting
+  audit `no-duplicate-jobs.json` proves exactly one allocation for each of eight
+  recorded attempts. `result.json`, run details, logs, and connection evidence
+  are retained beside it. Agent-infra contains `phase5_local_acceptance.py` and
+  `phase5_audit_jobs.py` to reproduce the checks.
+- An initial recovery harness tried to create a new run while offline. This
+  returned HTTP 500 because run creation needs remote repository metadata;
+  no new run or Slurm submission was made. This is not offline run creation
+  support. The acceptance harness was corrected to create the workflow and
+  pending dependent before disconnecting. Its initial parent (`dacdf2c3`, job
+  64) also completed after reconnection and is included in the accounting audit.
+- Schema-validated production config and Quadlet are prepared but not applied in
+  `~/.local/share/scripthut-deployments/phase5-2f17681/promotion-review`.
+  `review.json` records current/proposed file hashes, the tested image/helper,
+  origins, socket mount, and activation preconditions. They preserve production
+  sources/state and existing backends. Agent-infra's
+  `phase5_prepare_promotion.py` generates these conditional artifacts;
+  `docs/scripthut-openssh-deployment.md` documents operation and rollback.
+- The user completed Midway password/Duo in the candidate browser. Verified
+  `edjee` on `midway3-login3.rcc.local`, with `caslake` available, and confirmed
+  that the authenticated master survives candidate restart. Midway evidence is
+  under `/scratch/ed/scripthut/phase5-midway-20260910-170928`; its remote test
+  directory is `/scratch/midway3/edjee/scripthut/phase5-20260910-170928`.
+- Midway success/dependency workflow `26593ac1` completed as jobs 58267677 and
+  58267680, with API log retrieval, remote result-file verification, and browser
+  output-file download passing. Failure workflow `0a78b63f` exited 7 as job
+  58267888 and left its dependent unsubmitted. TIMEOUT (`20058523`, job 58267906)
+  and scheduler-confirmed CANCELLED (`21ef415c`, job 58267907) passed with
+  pi-akaring/caslake and one allocated CPU. Restart workflow `49ccbb0a`
+  completed as job 58294001, preserving that ID across candidate restart.
+  `basic-result.json` records these checks.
+- After coordinating a second browser password/Duo login with the user, recovery
+  workflow `3aeab7c2` retained parent job 58296243 across deliberate master loss
+  and controller restart while disconnected. Offline snapshots show its
+  dependent still pending without a job ID. After browser login replaced the
+  socket, the original parent completed and the dependent ran as job 58296502.
+  Both completed successfully. `recovery-stage.json` records completion and
+  `no-duplicate-jobs.json` proves exactly one allocation for each of all **10**
+  Midway submission attempts, including the initial log-pattern experiment.
+- Midway harness corrections are recorded rather than discarded: initial
+  startup waited for connection health before source discovery was complete,
+  so an early workflow request returned 404 without a run/submission. The
+  harness now waits for discovery. Initial success workflow `f7e4f98c` completed
+  as jobs 58267428/58267537 but used `%j` log paths; Slurm expanded those while
+  the application's log reader used the literal configured path. The corrected
+  harness uses explicit filenames. Original run and limitation evidence remain
+  in the same directory and must be included in the duplicate-allocation audit.
+- The final access-policy, fresh-backup, production-switch, and post-promotion
+  gates passed as recorded above. Do not restore the
+  pre-submission archive over newer runs; retain current state when changing
+  images and reconcile any in-flight submissions before rollback.
 
 ### Phase 1 validation (2026-09-09)
 
