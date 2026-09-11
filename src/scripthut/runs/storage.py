@@ -538,6 +538,9 @@ class RunStorageManager:
                 # Only remove terminal runs
                 if run.status.value not in ("completed", "failed", "cancelled"):
                     continue
+                from scripthut.runs.request_journal import RequestJournal
+                if RequestJournal(self.base_dir).protected(run.id):
+                    continue
                 if run.created_at < cutoff:
                     shutil.rmtree(run_dir)
                     removed += 1

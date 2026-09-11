@@ -26,6 +26,7 @@ from scripthut.config_schema import (
     SlurmBackendConfig,
 )
 from scripthut.runs.models import Run, RunItemStatus
+from scripthut.runs.request_journal import RequestBusy, RequestConflict
 from scripthut.submission import SubmissionConflict
 
 if TYPE_CHECKING:
@@ -151,6 +152,7 @@ def make_api_router(state: AppState) -> APIRouter:
                 "type": backend_type,
                 "connected": connected,
                 "max_concurrent": getattr(cfg, "max_concurrent", None),
+                "storage": cfg.storage.model_dump() if getattr(cfg, "storage", None) else None,
             })
         return {"backends": result}
 
@@ -264,7 +266,23 @@ def make_api_router(state: AppState) -> APIRouter:
         except (KeyError, ValueError) as e:
             raise HTTPException(status_code=422, detail=f"invalid task: {e}")
         try:
-            run = await rm.create_adhoc_run(task, backend, run_name=run_name)
+            key = payload.get('request_key')
+            if key is not None:
+                if set(payload) - {'task', 'backend', 'run_name', 'request_key', 'retain_until_archived'}:
+                    raise ValueError('Unsupported keyed submission fields')
+                if type(payload.get('retain_until_archived', False)) is not bool:
+                    raise ValueError('retain_until_archived must be boolean')
+                semantic = {k: v for k, v in payload.items() if k != 'request_key'}
+                run = await rm.create_keyed_adhoc_run(key, semantic)
+                if run is None:
+                    record = rm.request_journal.lookup(key)
+                    return {'id': record['run_id'], 'status': 'history_expired', 'request_key': key}
+            else:
+                run = await rm.create_adhoc_run(task, backend, run_name=run_name)
+        except RequestConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except RequestBusy as e:
+            raise HTTPException(status_code=503, detail=str(e), headers={'Retry-After': '1'})
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except Exception as e:
@@ -272,6 +290,41 @@ def make_api_router(state: AppState) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(e))
         state.notify_poll()
         return _run_summary(run)
+
+    @router.get("/submission-requests/{key:path}")
+    async def lookup_submission_request(key: str) -> dict:
+        journal = _require_manager().request_journal
+        if journal is None:
+            raise HTTPException(status_code=503, detail="Persistent submission journal unavailable")
+        try:
+            record = journal.lookup(key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if record is None:
+            raise HTTPException(status_code=404, detail="Unknown request key")
+        return {name: record[name] for name in ('key', 'digest', 'run_id', 'phase', 'archive_receipt')}
+
+    @router.post("/submission-requests/{key:path}/archive")
+    async def acknowledge_submission_archive(key: str, payload: dict) -> dict:
+        rm = _require_manager()
+        journal = rm.request_journal
+        if journal is None:
+            raise HTTPException(status_code=503, detail="Persistent submission journal unavailable")
+        try:
+            record = journal.lookup(key)
+            if record is None:
+                raise HTTPException(status_code=404, detail="Unknown request key")
+            run = rm.get_run(record['run_id'])
+            if run is not None and run.status.value not in {'completed', 'failed', 'cancelled'}:
+                raise ValueError('Cannot acknowledge archival of nonterminal work')
+            if run is None and record['archive_receipt'] is None:
+                raise ValueError('Terminal execution record missing; cannot verify archival eligibility')
+            journal.acknowledge(key, payload.get('archive_receipt_sha256'))
+        except RequestConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {'acknowledged': True, 'run_id': record['run_id']}
 
     @router.post("/tasks/probe")
     async def probe_tasks_v1(payload: dict) -> dict[str, Any]:

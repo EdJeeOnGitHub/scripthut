@@ -152,6 +152,9 @@ class RunManager:
         self.backends = backends
         self.runs: dict[str, Run] = {}
         self.storage = storage
+        from scripthut.runs.request_journal import RequestJournal
+        journal_root = getattr(storage, 'base_dir', None)
+        self.request_journal = RequestJournal(journal_root) if isinstance(journal_root, Path) else None
         self.job_backends = job_backends or {}
         # Task result cache (no-op unless config.cache.enabled + store set).
         # ``getattr`` keeps lightweight test config stubs (which omit the
@@ -704,6 +707,8 @@ class RunManager:
         doc_env_groups: dict[str, list[EnvRule]] | None = None,
         doc_stacks: dict[str, Stack] | None = None,
         source_name: str | None = None,
+        reserved_run_id: str | None = None,
+        request_key: str | None = None,
     ) -> Run:
         """Build a Run: resolve deps, validate, create, persist, and start processing.
 
@@ -735,7 +740,7 @@ class RunManager:
             log_dir = f"backend://{backend_name}/{workflow_name}"
             logger.info(f"Backend '{backend_name}' has no filesystem — logs via backend API")
 
-        run_id = str(uuid.uuid4())[:8]
+        run_id = reserved_run_id or str(uuid.uuid4())[:8]
         run = Run(
             id=run_id,
             workflow_name=workflow_name,
@@ -755,6 +760,11 @@ class RunManager:
             source_name=source_name,
         )
 
+        if request_key is not None:
+            # No task is visible to the scheduler until its run is durable.
+            assert self.storage is not None and self.request_journal is not None
+            self.storage.save_run(run, durable=True)
+            self.request_journal.accepted(request_key)
         self.runs[run_id] = run
         logger.info(f"Created run '{run_id}' with {len(tasks)} tasks")
 
@@ -896,6 +906,35 @@ class RunManager:
             [task], workflow_name, backend_name, max_concurrent=None,
             ssh_client=ssh_client, source_name=source_name,
         )
+
+    async def create_keyed_adhoc_run(self, key: str, payload: dict) -> Run | None:
+        """Retry-safe HTTP handoff. None means accepted history has expired."""
+        journal = self.request_journal
+        if journal is None:
+            raise RuntimeError("Keyed submissions require persistent storage")
+        task = TaskDefinition.from_dict(payload['task'])
+        backend = payload['backend']
+        if self.config.get_backend(backend) is None:
+            raise ValueError(f"Backend '{backend}' not found")
+        with journal.lease(key):
+            record = journal.reserve(key, payload)
+            run = self.runs.get(record['run_id'])
+            if run is None and self.storage is not None:
+                run = self.storage.load_all_runs().get(record['run_id'])
+                if run is not None:
+                    self.runs[run.id] = run
+            if run is not None:
+                journal.accepted(key)
+                return run
+            if record['phase'] == 'accepted':
+                # Missing history is never permission to execute again.
+                return None
+            ssh = self.get_ssh_client(backend)
+            if ssh is None and self.get_job_backend(backend) is None:
+                raise ValueError(f"Backend '{backend}' is not available")
+            return await self._build_run([task], payload.get('run_name') or f"_adhoc/{task.id}",
+                backend, max_concurrent=None, ssh_client=ssh,
+                reserved_run_id=record['run_id'], request_key=key)
 
     async def create_adhoc_run(
         self,
@@ -2348,6 +2387,9 @@ class RunManager:
         if run.status in (RunStatus.PENDING, RunStatus.RUNNING):
             return False
 
+        if self.request_journal is not None and self.request_journal.protected(run.id):
+            return False
+
         # Delete from storage
         if self.storage:
             self.storage.delete_run(run)
@@ -2412,6 +2454,12 @@ class RunManager:
             except Exception as exc:
                 logger.error(f"Failed to process run '{run.id}' during restore: {exc}")
 
+        if self.request_journal is not None:
+            for record in self.request_journal.pending():
+                try:
+                    await self.create_keyed_adhoc_run(record['key'], json.loads(record['payload']))
+                except Exception as exc:
+                    logger.warning("Deferred request recovery %s: %s", record['key'], exc)
         logger.info(f"Restored {len(self.runs)} runs from storage")
         return len(self.runs)
 
