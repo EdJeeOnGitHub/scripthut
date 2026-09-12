@@ -1029,8 +1029,10 @@ app = FastAPI(
 from scripthut.api import make_api_router  # noqa: E402
 
 from scripthut.research_api import make_research_router
+from scripthut.artifact_api import make_artifact_router
 
 app.include_router(make_research_router())
+app.include_router(make_artifact_router())
 app.include_router(make_api_router(state))
 app.include_router(make_login_router(state))
 
