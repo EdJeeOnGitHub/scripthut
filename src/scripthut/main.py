@@ -1041,6 +1041,10 @@ templates_path = Path(__file__).parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_path))
 templates.env.globals["scripthut_version"] = __version__
 
+from scripthut.artifact_views import make_artifact_views
+
+app.include_router(make_artifact_views(templates))
+
 
 _STARTING_PAGE = """\
 <!DOCTYPE html>

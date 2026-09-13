@@ -127,6 +127,7 @@ class RunStorageManager:
             "agent_session": run.agent_session,
             "agent_mode": run.agent_mode,
             "agent_session_name": run.agent_session_name,
+            "artifact_refs": run.artifact_refs,
             "items": [item.to_dict() for item in run.items],
         }
 
@@ -204,6 +205,7 @@ class RunStorageManager:
                 agent_session=data.get("agent_session", False),
                 agent_mode=data.get("agent_mode"),
                 agent_session_name=data.get("agent_session_name"),
+                artifact_refs=data.get("artifact_refs"),
             )
         except Exception as e:
             logger.error(f"Failed to load run from {run_dir}: {e}")

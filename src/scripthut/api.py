@@ -269,8 +269,12 @@ def make_api_router(state: AppState) -> APIRouter:
         try:
             key = payload.get('request_key')
             if key is not None:
-                if set(payload) - {'task', 'backend', 'run_name', 'request_key', 'retain_until_archived'}:
+                if set(payload) - {'task', 'backend', 'run_name', 'request_key', 'retain_until_archived', 'artifact_refs'}:
                     raise ValueError('Unsupported keyed submission fields')
+                from scripthut.artifact_refs import snapshot
+                references = snapshot(payload.get('artifact_refs'))
+                if references and references['outputs']:
+                    raise ValueError('Outputs are attached after execution, not at submission')
                 if type(payload.get('retain_until_archived', False)) is not bool:
                     raise ValueError('retain_until_archived must be boolean')
                 semantic = {k: v for k, v in payload.items() if k != 'request_key'}
@@ -279,6 +283,8 @@ def make_api_router(state: AppState) -> APIRouter:
                     record = rm.request_journal.lookup(key)
                     return {'id': record['run_id'], 'status': 'history_expired', 'request_key': key}
             else:
+                if payload.get('artifact_refs'):
+                    raise ValueError('Artifact references require a durable keyed submission')
                 run = await rm.create_adhoc_run(task, backend, run_name=run_name)
         except RequestConflict as e:
             raise HTTPException(status_code=409, detail=str(e))
@@ -667,9 +673,20 @@ def make_api_router(state: AppState) -> APIRouter:
         summary["log_dir"] = run.log_dir
         summary["account"] = run.account
         summary["commit_hash"] = run.commit_hash
+        summary['artifact_refs'] = run.artifact_refs
         summary["git_repo"] = run.git_repo
         summary["git_branch"] = run.git_branch
         return summary
+
+    @router.post('/runs/{run_id}/artifacts')
+    async def attach_artifact_outputs(run_id: str, payload: dict) -> dict[str, Any]:
+        try:
+            references = await _require_manager().attach_artifact_outputs(run_id, payload)
+            return {'run_id': run_id, 'artifact_refs': references}
+        except KeyError:
+            raise HTTPException(404, 'Run not found')
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
 
     @router.get("/runs/{run_id}/tasks/{task_id}/manifest")
     async def get_task_manifest_v1(run_id: str, task_id: str) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+from urllib.parse import quote
 from collections.abc import AsyncIterator
 
 import httpx
@@ -17,9 +18,20 @@ MAX_PATCH = 8 * 1024 * 1024
 
 def allowed(method: str, path: str) -> bool:
     session = r'[a-f0-9]{32}'
+    file = re.fullmatch(r'artifacts/sha256:[a-f0-9]{64}/files/(.+)', path)
+    if method in {'GET', 'HEAD'} and file:
+        name = file.group(1)
+        return (all(part not in {'', '.', '..'} for part in name.split('/'))
+                and '\\' not in name and not any(ord(c) < 32 or ord(c) == 127 for c in name))
     if method == 'GET' and re.fullmatch(r'artifacts(?:/sha256:[a-f0-9]{64})?', path):
         return True
     if method == 'POST' and path == 'artifact-uploads':
+        return True
+    if method == 'POST' and path == 'artifact-imports':
+        return True
+    if method == 'GET' and re.fullmatch(r'artifact-imports/' + session, path):
+        return True
+    if method == 'POST' and re.fullmatch(r'artifact-imports/' + session + '/retry', path):
         return True
     if method == 'GET' and re.fullmatch(r'(?:artifact-uploads|artifact-transfers)/' + session, path):
         return True
@@ -35,8 +47,10 @@ def make_artifact_router() -> APIRouter:
     @router.api_route('/artifact-uploads', methods=['POST'])
     @router.api_route('/artifact-uploads/{suffix:path}', methods=['GET', 'POST', 'HEAD', 'PATCH'])
     @router.api_route('/artifact-transfers/{suffix:path}', methods=['GET'])
+    @router.api_route('/artifact-imports', methods=['POST'])
+    @router.api_route('/artifact-imports/{suffix:path}', methods=['GET', 'POST'])
     @router.api_route('/artifacts', methods=['GET'])
-    @router.api_route('/artifacts/{suffix:path}', methods=['GET'])
+    @router.api_route('/artifacts/{suffix:path}', methods=['GET', 'HEAD'])
     async def proxy(request: Request, suffix: str = '') -> StreamingResponse:
         path = request.url.path.removeprefix('/api/v1/')
         if request.url.query or not allowed(request.method, path):
@@ -50,7 +64,8 @@ def make_artifact_router() -> APIRouter:
             length = int(request.headers.get('content-length', '0'))
         except ValueError as exc:
             raise HTTPException(400, 'Invalid Content-Length') from exc
-        limit = MAX_PATCH if request.method == 'PATCH' else MAX_METADATA if path == 'artifact-uploads' else 0
+        limit = (MAX_PATCH if request.method == 'PATCH' else MAX_METADATA if path == 'artifact-uploads'
+                 else 16384 if path == 'artifact-imports' else 0)
         if not 0 <= length <= limit:
             raise HTTPException(413, 'Artifact request exceeds size limit')
 
@@ -67,13 +82,13 @@ def make_artifact_router() -> APIRouter:
                 raise HTTPException(400, 'Artifact body ended before declared length')
 
         headers = {'Content-Length': str(length)}
-        for name in ('Content-Type', 'X-Artifact-Token', 'Upload-Offset'):
+        for name in ('Content-Type', 'X-Artifact-Token', 'Upload-Offset', 'Range', 'If-Range'):
             if value := request.headers.get(name):
                 headers[name] = value
         client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=socket),
                                    timeout=httpx.Timeout(130, connect=10), follow_redirects=False)
         try:
-            upstream = await client.send(client.build_request(request.method, 'http://artifacts/' + path,
+            upstream = await client.send(client.build_request(request.method, 'http://artifacts/' + quote(path, safe='/:'),
                                                                content=body(), headers=headers), stream=True)
         except BaseException as exc:
             await client.aclose()
@@ -94,7 +109,9 @@ def make_artifact_router() -> APIRouter:
 
         response_headers = {name: value for name, value in upstream.headers.items()
                             if name.lower() in {'content-type', 'content-length', 'upload-offset',
-                                                'upload-length', 'tus-resumable', 'location'}}
+                                                'upload-length', 'tus-resumable', 'location', 'content-range',
+                                                'content-disposition', 'accept-ranges', 'etag', 'cache-control',
+                                                'x-content-type-options', 'content-security-policy'}}
         return StreamingResponse(response_body(), status_code=upstream.status_code,
                                  headers=response_headers, background=BackgroundTask(close))
 

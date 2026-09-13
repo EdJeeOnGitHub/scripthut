@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScriptHut — Artifacts</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen text-gray-900">
+<main class="container mx-auto px-4 py-8">
+  <header class="mb-8">{% include "nav.html" %}</header>
+  <h1 class="text-2xl font-semibold mb-4">Artifacts</h1>
+  {% if error %}
+    <p role="alert" class="rounded border border-amber-300 bg-amber-50 p-4">{{ error }}</p>
+  {% elif artifact %}
+    <a class="text-blue-700 underline" href="{{ request.url_for('artifact_list') }}">All artifacts</a>
+    <p class="font-mono text-sm break-all my-4">{{ artifact.id }}</p>
+    {% for entry in artifact.entries %}
+      <p class="mb-2"><strong>{{ entry.project }} / {{ entry.name }}</strong> · {{ entry.kind }}</p>
+    {% endfor %}
+    <h2 class="text-lg font-semibold mt-6 mb-2">Files</h2>
+    <div class="overflow-x-auto rounded border bg-white">
+    <table class="w-full text-left">
+      <thead><tr class="border-b"><th class="p-3">File</th><th class="p-3">Bytes</th></tr></thead>
+      <tbody>{% for file in files %}
+        <tr class="border-b"><td class="p-3"><a class="text-blue-700 underline" href="{{ file.url }}" target="_blank" rel="noopener">{{ file.path }}</a></td><td class="p-3 tabular-nums">{{ file.size }}</td></tr>
+      {% else %}<tr><td class="p-3" colspan="2">This artifact has no files.</td></tr>{% endfor %}</tbody>
+    </table></div>
+    <h2 class="text-lg font-semibold mt-6 mb-2">Related runs</h2>
+    <ul>{% for reference in artifact.runs %}
+      <li class="mb-2">{{ reference.role|capitalize }} · {{ reference.name }} ·
+      {% if reference.run_id %}<a class="text-blue-700 underline" href="/runs/{{ reference.run_id }}">{{ reference.run_id }}</a>
+      {% else %}<a class="text-blue-700 underline" href="/research-runs/{{ reference.request_id }}">Request {{ reference.request_id }}</a>{% endif %}</li>
+    {% else %}<li>No runs reference this artifact yet.</li>{% endfor %}</ul>
+  {% else %}
+    <div class="overflow-x-auto rounded border bg-white">
+    <table class="w-full text-left">
+      <thead><tr class="border-b"><th class="p-3">Project / name</th><th class="p-3">Kind</th><th class="p-3">Version</th></tr></thead>
+      <tbody>{% for entry in artifacts %}
+        <tr class="border-b"><td class="p-3"><a class="text-blue-700 underline" href="{{ request.url_for('artifact_detail', version=entry.version) }}">{{ entry.project }} / {{ entry.name }}</a></td><td class="p-3">{{ entry.kind }}</td><td class="p-3 font-mono text-sm">{{ entry.version[:19] }}…</td></tr>
+      {% else %}<tr><td class="p-3" colspan="3">No artifacts have been published yet.</td></tr>{% endfor %}</tbody>
+    </table></div>
+  {% endif %}
+</main>
+</body>
+</html>

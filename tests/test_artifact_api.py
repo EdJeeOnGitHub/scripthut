@@ -4,7 +4,59 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from scripthut.artifact_api import MAX_PATCH, make_artifact_router
+from scripthut.artifact_api import MAX_PATCH, allowed, make_artifact_router
+
+
+def test_registered_import_routes_are_bounded():
+    session = 'a' * 32
+    assert allowed('POST', 'artifact-imports')
+    assert allowed('GET', 'artifact-imports/' + session)
+    assert allowed('POST', 'artifact-imports/' + session + '/retry')
+    assert not allowed('POST', 'artifact-imports/' + session + '/arbitrary-command')
+    assert not allowed('GET', 'artifact-imports/not-an-id')
+    base = 'artifacts/sha256:' + 'b' * 64 + '/files/'
+    assert allowed('GET', base + 'report é.pdf')
+    assert allowed('HEAD', base + 'report.pdf')
+    for path in ('../host.json', 'nested/../../host.json', 'a\\b', 'a\nb', '/absolute'):
+        assert not allowed('GET', base + path)
+
+
+@pytest.mark.asyncio
+async def test_pdf_range_headers_and_encoded_filename(tmp_path, monkeypatch):
+    socket = str(tmp_path / 'download.sock')
+    monkeypatch.setenv('SCRIPTHUT_ARTIFACT_SOCKET', socket)
+    captured = asyncio.get_running_loop().create_future()
+
+    async def serve(reader, writer):
+        try:
+            headers = await reader.readuntil(b'\r\n\r\n')
+            captured.set_result(headers)
+            writer.write(b'HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\n'
+                         b'Content-Type: application/pdf\r\nContent-Range: bytes 0-4/100\r\n'
+                         b'Accept-Ranges: bytes\r\nETag: "fixed"\r\n'
+                         b'Content-Disposition: inline\r\nX-Content-Type-Options: nosniff\r\n'
+                         b'Content-Security-Policy: sandbox\r\nConnection: close\r\n\r\n%PDF-')
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_unix_server(serve, path=socket)
+    app = FastAPI()
+    app.include_router(make_artifact_router())
+    path = '/api/v1/artifacts/sha256:' + 'b' * 64 + '/files/report%20%C3%A9.pdf'
+    async with server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.get(path, headers={'Range': 'bytes=0-4', 'If-Range': '"fixed"'})
+    assert response.status_code == 206
+    assert response.content == b'%PDF-'
+    assert response.headers['content-range'] == 'bytes 0-4/100'
+    assert response.headers['content-disposition'] == 'inline'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert response.headers['content-security-policy'] == 'sandbox'
+    headers = await asyncio.wait_for(captured, 5)
+    assert b'/files/report%20%C3%A9.pdf HTTP/1.1' in headers
+    assert b'Range: bytes=0-4' in headers
+    assert b'If-Range: "fixed"' in headers
 
 
 @pytest.mark.asyncio
@@ -22,6 +74,7 @@ async def test_limits_and_closed_routes(monkeypatch):
         assert (await client.post('/api/v1/artifact-uploads', headers={'Transfer-Encoding':'chunked'})).status_code == 400
         assert (await client.get('/api/v1/artifact-uploads/not-an-id')).status_code == 404
         assert (await client.get('/api/v1/artifacts/sha256:'+'c'*64)).status_code == 503
+        assert (await client.post('/api/v1/artifact-imports', headers={'Content-Length': '16385'})).status_code == 413
 
 
 @pytest.mark.asyncio

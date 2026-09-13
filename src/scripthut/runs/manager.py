@@ -756,6 +756,7 @@ class RunManager:
         source_name: str | None = None,
         reserved_run_id: str | None = None,
         request_key: str | None = None,
+        artifact_refs: dict | None = None,
     ) -> Run:
         """Build a Run: resolve deps, validate, create, persist, and start processing.
 
@@ -788,6 +789,7 @@ class RunManager:
             logger.info(f"Backend '{backend_name}' has no filesystem — logs via backend API")
 
         run_id = reserved_run_id or str(uuid.uuid4())[:8]
+        from scripthut.artifact_refs import snapshot
         run = Run(
             id=run_id,
             workflow_name=workflow_name,
@@ -805,6 +807,7 @@ class RunManager:
             doc_env_groups=dict(doc_env_groups or {}),
             doc_stacks=dict(doc_stacks or {}),
             source_name=source_name,
+            artifact_refs=snapshot(artifact_refs),
         )
 
         if request_key is not None:
@@ -956,6 +959,10 @@ class RunManager:
 
     async def create_keyed_adhoc_run(self, key: str, payload: dict) -> Run | None:
         """Retry-safe HTTP handoff. None means accepted history has expired."""
+        from scripthut.artifact_refs import snapshot
+        references = snapshot(payload.get('artifact_refs'))
+        if references and references['outputs']:
+            raise ValueError('Outputs cannot be attached before execution')
         journal = self.request_journal
         if journal is None:
             raise RuntimeError("Keyed submissions require persistent storage")
@@ -981,7 +988,40 @@ class RunManager:
                 raise ValueError(f"Backend '{backend}' is not available")
             return await self._build_run([task], payload.get('run_name') or f"_adhoc/{task.id}",
                 backend, max_concurrent=None, ssh_client=ssh,
-                reserved_run_id=record['run_id'], request_key=key)
+                reserved_run_id=record['run_id'], request_key=key, artifact_refs=payload.get('artifact_refs'))
+
+    async def attach_artifact_outputs(self, run_id: str, value: dict) -> dict:
+        """Durably attach immutable output references without rerunning tasks."""
+        from scripthut.artifact_refs import snapshot
+        requested = snapshot(value)
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        async with self.submissions.lock(run):
+            if run.status.value != 'completed' or run.artifact_refs is None or requested is None:
+                raise ValueError('Output attachment requires a completed run with captured artifact provenance')
+            existing = snapshot(run.artifact_refs)
+            assert existing is not None
+            if any(requested[key] != existing[key] for key in ('schema_version', 'request_id', 'source_commit', 'inputs')):
+                raise ValueError('Captured input and source provenance cannot change')
+            outputs = {item['name']: item for item in existing['outputs']}
+            for item in requested['outputs']:
+                if item['name'] in outputs and outputs[item['name']] != item:
+                    raise ValueError('Output name already refers to another version')
+                outputs[item['name']] = item
+            merged = snapshot(dict(existing, outputs=[outputs[name] for name in sorted(outputs)]))
+            if self.storage is None:
+                raise ValueError('Artifact attachment requires persistent run storage')
+            previous = run.artifact_refs
+            run.artifact_refs = merged
+            try:
+                self.storage.save_run(run, durable=True)
+            except Exception:
+                run.artifact_refs = previous
+                raise
+            self.notify_run(run.id)
+            assert merged is not None
+            return merged
 
     async def create_adhoc_run(
         self,
@@ -1558,6 +1598,8 @@ class RunManager:
         run = self.get_run(run_id)
         if run is None:
             raise ValueError(f"Run '{run_id}' not found")
+        if run.artifact_refs is not None:
+            raise ValueError('Artifact-linked runs require a new launcher request; retry output collection separately')
 
         if run.submission_unresolved:
             raise SubmissionConflict("Resolve unknown submissions before rerunning")
