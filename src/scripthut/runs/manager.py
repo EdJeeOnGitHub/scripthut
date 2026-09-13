@@ -998,8 +998,11 @@ class RunManager:
         if run is None:
             raise KeyError(run_id)
         async with self.submissions.lock(run):
-            if run.status.value != 'completed' or run.artifact_refs is None or requested is None:
-                raise ValueError('Output attachment requires a completed run with captured artifact provenance')
+            if run.status.value not in {'completed', 'failed', 'cancelled'} or run.artifact_refs is None or requested is None:
+                raise ValueError('Output attachment requires a terminal run with captured artifact provenance')
+            expected_status = None if run.status.value == 'completed' else run.status.value
+            if any(item.get('execution_status') != expected_status for item in requested['outputs']):
+                raise ValueError('Partial outputs must be labeled with the originating execution status')
             existing = snapshot(run.artifact_refs)
             assert existing is not None
             if any(requested[key] != existing[key] for key in ('schema_version', 'request_id', 'source_commit', 'inputs')):

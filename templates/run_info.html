@@ -8,6 +8,7 @@
     <p class="text-sm"><strong>{{ role|capitalize }}:</strong>
         {% for reference in run.artifact_refs[role] %}
         <a class="text-blue-700 underline mr-3" href="{{ request.scope.get('root_path', '') }}/artifacts/{{ reference.version }}">{{ reference.name }} · {{ reference.version[7:19] }}</a>
+        {% if reference.execution_status %}<span class="text-amber-800">Partial output ({{ reference.execution_status }})</span>{% endif %}
         {% else %}{{ 'Awaiting collection' if role == 'outputs' else 'None' }}{% endfor %}
     </p>
     {% endfor %}

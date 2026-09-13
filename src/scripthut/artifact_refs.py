@@ -10,6 +10,7 @@ class ArtifactReference(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     name: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$')
     version: str = Field(pattern=r'^sha256:[a-f0-9]{64}$')
+    execution_status: Literal['failed', 'cancelled'] | None = None
 
 
 class RunArtifacts(BaseModel):
@@ -22,6 +23,8 @@ class RunArtifacts(BaseModel):
 
     @model_validator(mode='after')
     def unique_names(self) -> RunArtifacts:
+        if any(reference.execution_status is not None for reference in self.inputs):
+            raise ValueError('Partial execution labels are only valid for outputs')
         for references in (self.inputs, self.outputs):
             if len({r.name for r in references}) != len(references):
                 raise ValueError('Artifact reference names must be unique within each role')
@@ -29,4 +32,4 @@ class RunArtifacts(BaseModel):
 
 
 def snapshot(value: Any) -> dict[str, Any] | None:
-    return None if value is None else RunArtifacts.model_validate(value).model_dump()
+    return None if value is None else RunArtifacts.model_validate(value).model_dump(exclude_none=True)
