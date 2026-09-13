@@ -29,8 +29,8 @@
     <h2 class="text-lg font-semibold mt-6 mb-2">Related runs</h2>
     <ul>{% for reference in artifact.runs %}
       <li class="mb-2">{{ reference.role|capitalize }} · {{ reference.name }} ·
-      {% if reference.run_id %}<a class="text-blue-700 underline" href="/runs/{{ reference.run_id }}">{{ reference.run_id }}</a>
-      {% else %}<a class="text-blue-700 underline" href="/research-runs/{{ reference.request_id }}">Request {{ reference.request_id }}</a>{% endif %}</li>
+      {% if reference.run_id %}<a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/runs/{{ reference.run_id }}">{{ reference.run_id }}</a>
+      {% else %}<a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/research-runs/{{ reference.request_id }}">Request {{ reference.request_id }}</a>{% endif %}</li>
     {% else %}<li>No runs reference this artifact yet.</li>{% endfor %}</ul>
   {% else %}
     <div class="overflow-x-auto rounded border bg-white">

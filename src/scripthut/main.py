@@ -1019,6 +1019,7 @@ def reload_runtime_config(new_config: ScriptHutConfig) -> ReloadReport:
 
 # Create FastAPI app
 app = FastAPI(
+    root_path=os.environ.get('SCRIPTHUT_ROOT_PATH', ''),
     title="ScriptHut",
     description="Remote job management for Slurm, ECS, and AWS Batch",
     version=__version__,

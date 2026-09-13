@@ -44,7 +44,7 @@
                     {% endif %}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap">
-                    <a href="/runs/{{ run.id }}" class="text-blue-600 hover:text-blue-800 font-mono">
+                    <a href="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}" class="text-blue-600 hover:text-blue-800 font-mono">
                         {{ run.id }}
                     </a>
                 </td>
@@ -83,11 +83,11 @@
                     </span>
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap flex items-center gap-3">
-                    <a href="/runs/{{ run.id }}" class="text-blue-600 hover:text-blue-800 text-sm">
+                    <a href="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}" class="text-blue-600 hover:text-blue-800 text-sm">
                         View
                     </a>
                     {% if deletable %}
-                    <button hx-delete="/runs/{{ run.id }}"
+                    <button hx-delete="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}"
                             hx-confirm="Delete run {{ run.id }}?"
                             hx-target="closest tr"
                             hx-swap="outerHTML swap:200ms"
@@ -120,7 +120,7 @@
         <span class="block w-4" title="Still running — cancel it first"></span>
         {% endif %}
     </span>
-    <a href="/runs/{{ run.id }}" class="flex-1 min-w-0 block px-4 py-3 hover:bg-gray-50 active:bg-gray-100">
+    <a href="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}" class="flex-1 min-w-0 block px-4 py-3 hover:bg-gray-50 active:bg-gray-100">
         <!-- Row 1: Workflow name + Status badge -->
         <div class="flex items-start justify-between gap-2">
             <span class="text-sm font-medium text-gray-900 truncate">{{ run.workflow_name }}</span>

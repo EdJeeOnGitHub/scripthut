@@ -11,6 +11,7 @@
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
+    const scriptHutRoot = {{ request.scope.get('root_path', '')|tojson }};
     document.addEventListener('submit', async (event) => {
         const form = event.target.closest('[data-submission-resolution]');
         if (!form) return;
@@ -26,7 +27,7 @@
         const buttons = form.querySelectorAll('button');
         buttons.forEach(button => button.disabled = true);
         try {
-            const response = await fetch(`/api/v1/runs/${encodeURIComponent(form.dataset.run)}/tasks/${encodeURIComponent(form.dataset.task)}/submission`, {
+            const response = await fetch(`${scriptHutRoot}/api/v1/runs/${encodeURIComponent(form.dataset.run)}/tasks/${encodeURIComponent(form.dataset.task)}/submission`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({action, attempt_id: form.dataset.attempt,
                     job_id: fields.get('job_id') || null, confirm_not_submitted: confirmed})
@@ -51,7 +52,7 @@
         </header>
         <div class="mb-6">
             <h2 class="text-xl font-semibold text-gray-800 flex items-center gap-2">
-                <a href="/runs" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-600 hover:bg-gray-300 hover:text-gray-800 transition-colors text-sm font-medium" title="Back to Runs">
+                <a href="{{ request.scope.get('root_path', '') }}/runs" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-600 hover:bg-gray-300 hover:text-gray-800 transition-colors text-sm font-medium" title="Back to Runs">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"></path></svg>
                     Runs
                 </a>
@@ -107,7 +108,7 @@
                 if (mode === 'remote') {
                     var link = document.getElementById('agent-open-link');
                     var poll = function () {
-                        fetch('/runs/' + encodeURIComponent(runId) + '/agent-link')
+                        fetch(scriptHutRoot + '/runs/' + encodeURIComponent(runId) + '/agent-link')
                             .then(function (r) { return r.json(); })
                             .then(function (d) {
                                 if (d.url) {
@@ -125,11 +126,11 @@
                     var btn = document.getElementById('agent-tui-btn');
                     var poll = function () {
                         if (!jobId) { setTimeout(function () { location.reload(); }, 5000); return; }
-                        fetch('/terminal/jobs/' + encodeURIComponent(backend) + '/' + encodeURIComponent(jobId) + '/status')
+                        fetch(scriptHutRoot + '/terminal/jobs/' + encodeURIComponent(backend) + '/' + encodeURIComponent(jobId) + '/status')
                             .then(function (r) { return r.json(); })
                             .then(function (d) {
                                 if (d.node) {
-                                    btn.href = '/terminal/' + encodeURIComponent(backend) + '?session_type=job&node=' + encodeURIComponent(d.node) + '&job_id=' + encodeURIComponent(jobId);
+                                    btn.href = scriptHutRoot + '/terminal/' + encodeURIComponent(backend) + '?session_type=job&node=' + encodeURIComponent(d.node) + '&job_id=' + encodeURIComponent(jobId);
                                     btn.textContent = 'Open Claude TUI';
                                     btn.classList.remove('pointer-events-none', 'opacity-50');
                                 } else {
@@ -152,7 +153,7 @@
 
         {% if run %}
         <!-- SSE-connected run updates -->
-        <div hx-ext="sse" sse-connect="/runs/{{ run.id }}/events">
+        <div hx-ext="sse" sse-connect="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}/events">
             <!-- Run Info -->
             <div class="bg-white rounded-lg shadow-md p-6 mb-6" id="run-info" sse-swap="info-update"
                 hx-swap="innerHTML">
@@ -374,7 +375,7 @@
 
         function rerunRun(runId, mode) {
             if (!confirm('Re-run this run in place?')) return;
-            fetch('/runs/' + runId + '/rerun?mode=in_place', { method: 'POST' })
+            fetch(scriptHutRoot + '/runs/' + runId + '/rerun?mode=in_place', { method: 'POST' })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (data.error) { alert('Re-run failed: ' + data.error); return; }
@@ -517,7 +518,7 @@
                 return;
             }
 
-            var url = '/runs/' + _detailRunId + '/tasks/' + encodeURIComponent(_detailTaskId) + '/detail/' + _detailType;
+            var url = scriptHutRoot + '/runs/' + _detailRunId + '/tasks/' + encodeURIComponent(_detailTaskId) + '/detail/' + _detailType;
             if (_detailType === 'output' || _detailType === 'error') {
                 var tail = document.getElementById('detail-tail-select').value;
                 if (tail) url += '?tail=' + tail;
@@ -609,7 +610,7 @@
                     var attachBtn = document.getElementById('detail-attach-btn');
                     var debugBtn = document.getElementById('detail-debug-btn');
                     if (data.status === 'running' && data.node && data.backend_name) {
-                        attachBtn.href = '/terminal/' + data.backend_name + '?session_type=attach&node=' + encodeURIComponent(data.node);
+                        attachBtn.href = scriptHutRoot + '/terminal/' + data.backend_name + '?session_type=attach&node=' + encodeURIComponent(data.node);
                         attachBtn.style.display = '';
                     } else {
                         attachBtn.style.display = 'none';
@@ -623,7 +624,7 @@
                             debugBtn.classList.add('opacity-50');
                             debugBtn.title = 'Task already scheduled to start';
                         } else {
-                            debugBtn.href = '/terminal/' + data.backend_name + '?session_type=job&run_id=' + encodeURIComponent(data.run_id) + '&task_id=' + encodeURIComponent(data.task_id);
+                            debugBtn.href = scriptHutRoot + '/terminal/' + data.backend_name + '?session_type=job&run_id=' + encodeURIComponent(data.run_id) + '&task_id=' + encodeURIComponent(data.task_id);
                             debugBtn.style.pointerEvents = '';
                             debugBtn.classList.remove('opacity-50');
                             debugBtn.title = 'Debug: resubmit with interactive wait';
@@ -650,7 +651,7 @@
         // the server).
         function refreshRunSummary() {
             var runId = {{ run.id | tojson }};
-            fetch('/runs/' + encodeURIComponent(runId) + '/summary')
+            fetch(scriptHutRoot + '/runs/' + encodeURIComponent(runId) + '/summary')
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     var panel = document.getElementById('run-summary-panel');
@@ -691,7 +692,7 @@
         }
 
         function fetchEnvDetail() {
-            var url = '/runs/' + _detailRunId + '/tasks/' + encodeURIComponent(_detailTaskId) + '/env';
+            var url = scriptHutRoot + '/runs/' + _detailRunId + '/tasks/' + encodeURIComponent(_detailTaskId) + '/env';
             document.getElementById('detail-content').textContent = 'Loading...';
             document.getElementById('detail-error').style.display = 'none';
 

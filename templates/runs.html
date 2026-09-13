@@ -41,7 +41,7 @@
         </div>
 
         <!-- Runs List (SSE-connected) -->
-        <div hx-ext="sse" sse-connect="/runs/stream">
+        <div hx-ext="sse" sse-connect="{{ request.scope.get('root_path', '') }}/runs/stream">
             {# `runs-panel` carries the select-mode class: it sits OUTSIDE
                #runs-list, which the SSE stream replaces wholesale, so the
                mode survives a live refresh mid-selection. #}
@@ -60,7 +60,7 @@
                             <button type="button" onclick="selectNone()"
                                 class="text-sm px-2 py-1.5 rounded-md text-blue-600 hover:bg-blue-50">None</button>
                             <button id="delete-selected" type="button"
-                                hx-post="/runs/delete"
+                                hx-post="{{ request.scope.get('root_path', '') }}/runs/delete"
                                 hx-include="#runs-list"
                                 hx-target="#runs-list"
                                 hx-swap="innerHTML"

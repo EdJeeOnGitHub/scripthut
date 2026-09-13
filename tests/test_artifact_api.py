@@ -22,7 +22,8 @@ def test_registered_import_routes_are_bounded():
 
 
 @pytest.mark.asyncio
-async def test_pdf_range_headers_and_encoded_filename(tmp_path, monkeypatch):
+@pytest.mark.parametrize('prefix', ['', '/artifact-candidate'])
+async def test_pdf_range_headers_and_encoded_filename(tmp_path, monkeypatch, prefix):
     socket = str(tmp_path / 'download.sock')
     monkeypatch.setenv('SCRIPTHUT_ARTIFACT_SOCKET', socket)
     captured = asyncio.get_running_loop().create_future()
@@ -42,9 +43,9 @@ async def test_pdf_range_headers_and_encoded_filename(tmp_path, monkeypatch):
             await writer.wait_closed()
 
     server = await asyncio.start_unix_server(serve, path=socket)
-    app = FastAPI()
+    app = FastAPI(root_path=prefix)
     app.include_router(make_artifact_router())
-    path = '/api/v1/artifacts/sha256:' + 'b' * 64 + '/files/report%20%C3%A9.pdf'
+    path = prefix + '/api/v1/artifacts/sha256:' + 'b' * 64 + '/files/report%20%C3%A9.pdf'
     async with server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
         response = await client.get(path, headers={'Range': 'bytes=0-4', 'If-Range': '"fixed"'})
     assert response.status_code == 206

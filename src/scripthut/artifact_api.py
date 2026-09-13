@@ -53,6 +53,9 @@ def make_artifact_router() -> APIRouter:
     @router.api_route('/artifacts/{suffix:path}', methods=['GET', 'HEAD'])
     async def proxy(request: Request, suffix: str = '') -> StreamingResponse:
         path = request.url.path.removeprefix('/api/v1/')
+        root = request.scope.get('root_path', '')
+        if root:
+            path = request.url.path.removeprefix(root).removeprefix('/api/v1/')
         if request.url.query or not allowed(request.method, path):
             raise HTTPException(404, 'Unknown artifact operation')
         socket = os.environ.get('SCRIPTHUT_ARTIFACT_SOCKET')
