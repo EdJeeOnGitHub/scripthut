@@ -74,3 +74,5 @@ def test_run_navigation_and_live_updates_stay_on_mounted_service(prefix):
             assert 'const scriptHutRoot = "' + prefix + '";' in html
             assert "fetch('/runs/" not in html
             assert 'fetch(`/api/' not in html
+            expected_stream = f"new EventSource(\"{prefix}\" + '/notifications/stream')"
+            assert expected_stream in html

@@ -231,7 +231,7 @@
         document.title = parts.length ? parts.join(' ') + ' — ' + baseTitle : baseTitle;
     }
 
-    var es = new EventSource('/notifications/stream');
+    var es = new EventSource({{ request.scope.get('root_path', '')|tojson }} + '/notifications/stream');
     es.addEventListener('notify', onNotify);
     es.addEventListener('stats', onStats);
     // EventSource reconnects automatically on error; nothing to do.
