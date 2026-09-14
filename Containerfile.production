@@ -1,0 +1,9 @@
+# Frozen runtime dependencies from the verified production base.
+FROM ghcr.io/tlamadon/scripthut@sha256:c998c910f50eac4e6b4acc5460028b863a2bb67b2c9ad0a2af30c3ef761d52ab
+COPY src/ /app/src/
+COPY templates/ /app/templates/
+COPY pyproject.toml README.md /app/
+RUN chmod -R a+rX /app/src /app/templates
+ARG SOURCE_REVISION
+RUN test -n "$SOURCE_REVISION"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
