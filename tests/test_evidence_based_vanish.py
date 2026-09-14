@@ -92,7 +92,9 @@ def _state_for_run(run: Run, job_backend) -> tuple:
         clone_dir="/tmp",
     )
 
-    run_manager = MagicMock()
+    from scripthut.config_schema import ScriptHutConfig
+    from scripthut.runs.manager import RunManager
+    run_manager = RunManager(ScriptHutConfig(), {}, job_backends={"cluster": job_backend})
     run_manager.runs = {run.id: run}
     run_manager.process_run = AsyncMock()
     run_manager._persist_run = MagicMock()

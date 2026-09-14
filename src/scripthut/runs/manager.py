@@ -38,6 +38,9 @@ from scripthut.runs.models import (
     TaskDefinition,
     TaskOutput,
 )
+from scripthut.runs.observations import (
+    AccountingOutcome, BackendObservation, ItemIdentity, PollPlan, QueueObservation,
+)
 from scripthut.runs.submission import SubmissionManager
 from scripthut.sources.git import is_commit_sha, is_safe_branch_name
 from scripthut.ssh.transport import ExecutionClient, TransportError
@@ -169,6 +172,11 @@ class RunManager:
         # SSE event bus: version counter + Event per run
         self._run_versions: dict[str, int] = {}
         self._run_events: dict[str, asyncio.Event] = {}
+        self._lifecycle_revisions: dict[str, int] = {}
+        self._observation_sequences: dict[str, int] = {}
+        self._observation_applied: dict[str, int] = {}
+        self._observation_times: dict[str, datetime] = {}
+        self._observation_locks: dict[str, asyncio.Lock] = {}
 
     def _resolve_environment(
         self, run: Run, task: TaskDefinition
@@ -256,6 +264,14 @@ class RunManager:
             if color[task.id] == WHITE:
                 dfs(task.id, [])
 
+    def _invalidate_observations(self, run: Run) -> None:
+        self._lifecycle_revisions[run.id] = self._lifecycle_revisions.get(run.id, 0) + 1
+
+    def _effect_identity(self, run: Run, item: RunItem) -> tuple[object, ...]:
+        return (id(self.runs.get(run.id)), id(run), id(item), run.created_at,
+                self._lifecycle_revisions.get(run.id, 0), item.job_id, item.submitted_at,
+                item.status, item.submission_attempts[-1].id if item.submission_attempts else None)
+
     async def _handle_generates_source(
         self, run: Run, item: RunItem
     ) -> None:
@@ -280,7 +296,10 @@ class RunManager:
         if not path.startswith("/") and not path.startswith("~"):
             path = f"{item.task.working_dir}/{path}"
 
+        identity = self._effect_identity(run, item)
         stdout, stderr, exit_code = await ssh_client.run_command(f"cat {path}")
+        if self._effect_identity(run, item) != identity:
+            return
         if exit_code != 0:
             logger.error(
                 f"Failed to read generates_source '{path}': {stderr}"
@@ -424,6 +443,7 @@ class RunManager:
             f"-printf '%P\\t%s\\n' 2>/dev/null | head -{max_files_plus_one}; "
             f"[ -f {run_summary_path} ] && echo HAS_SUMMARY >&2"
         )
+        identity = self._effect_identity(run, item)
         try:
             stdout, stderr, exit_code = await ssh_client.run_command(cmd)
         except Exception as e:
@@ -433,6 +453,8 @@ class RunManager:
             )
             return
 
+        if self._effect_identity(run, item) != identity:
+            return
         outputs: list[TaskOutput] = []
         truncated = False
         for line in stdout.splitlines():
@@ -476,7 +498,7 @@ class RunManager:
         """Fan-out point for every "this item just reached COMPLETED" hook.
 
         Concentrating the calls here means callers (the three branches
-        in ``main.poll_backend`` that transition items to COMPLETED:
+        in this manager that transition items to COMPLETED:
         SETTLING→COMPLETED, SUBMITTED-past-grace, and the SETTLING
         long-grace fallback) don't have to remember to invoke each
         hook separately. New post-completion behavior should land
@@ -488,9 +510,14 @@ class RunManager:
         generates_source first because it has been the historically
         established hook.
         """
+        identity = self._effect_identity(run, item)
         if item.task.generates_source:
             await self._handle_generates_source(run, item)
+        if self._effect_identity(run, item) != identity:
+            return
         await self._handle_task_outputs(run, item)
+        if self._effect_identity(run, item) != identity:
+            return
         # Hash the declared outputs for the task manifest — before the
         # cache store below, so the stored cache manifest carries the same
         # per-file hashes a manifest consumer sees. Cache hits normally
@@ -504,9 +531,12 @@ class RunManager:
         ):
             ssh_client = self.get_ssh_client(run.backend_name)
             if ssh_client is not None:
-                item.output_hashes = await self.cache_manager.hash_inputs(
+                hashes = await self.cache_manager.hash_inputs(
                     ssh_client, item.task.working_dir, item.task.outputs,
                 )
+                if self._effect_identity(run, item) != identity:
+                    return
+                item.output_hashes = hashes
                 self._persist_run(run)
         # Persist the task's declared output artifacts to the result cache so
         # a future run with the same inputs can skip it. No-op for cache hits
@@ -1645,6 +1675,7 @@ class RunManager:
         if run.status in (RunStatus.RUNNING, RunStatus.PENDING):
             raise ValueError("Cannot rerun a run that is still active")
 
+        self._invalidate_observations(run)
         # Reset all items to pending
         for item in run.items:
             item.status = RunItemStatus.PENDING
@@ -2245,35 +2276,215 @@ class RunManager:
         except asyncio.TimeoutError:
             return False
 
+    def _item_identity(self, run: Run, item: RunItem) -> ItemIdentity:
+        assert item.job_id is not None
+        return ItemIdentity(
+            run.id, item.task.id, item.job_id,
+            item.submission_attempts[-1].id if item.submission_attempts else None,
+            item.submitted_at, id(run), id(item), self._lifecycle_revisions.get(run.id, 0),
+        )
+
+    def _observed_items(self, run: Run, plan: PollPlan) -> list[RunItem]:
+        """Resolve a captured inventory against live state after every await."""
+        if self.runs.get(run.id) is not run:
+            return []
+        identities = set(plan.items)
+        return [item for item in run.items if item.job_id and not item.submission_unresolved
+                and self._item_identity(run, item) in identities]
+
+    def plan_backend_observation(
+        self, backend_name: str, queue: QueueObservation,
+    ) -> PollPlan:
+        sequence = self._observation_sequences.get(backend_name, 0) + 1
+        self._observation_sequences[backend_name] = sequence
+        live_ids = {job_id for job_id, _, _ in queue.jobs}
+        identities: list[ItemIdentity] = []
+        accounting_ids: list[str] = []
+        for run in self.runs.values():
+            if run.backend_name != backend_name:
+                continue
+            for item in run.items:
+                if not item.job_id or item.submission_unresolved:
+                    continue
+                # Queue collection can itself await a slow backend. Do not use
+                # that snapshot for a submission made while it was in flight.
+                if item.submitted_at and item.submitted_at > queue.observed_at:
+                    continue
+                identities.append(self._item_identity(run, item))
+                if (
+                    (item.status in (RunItemStatus.COMPLETED, RunItemStatus.FAILED)
+                     and item.scheduler_state is None)
+                    or item.status == RunItemStatus.SETTLING
+                    or (item.status == RunItemStatus.SUBMITTED and item.job_id not in live_ids
+                        and item.submitted_at is not None
+                        and (queue.observed_at - item.submitted_at).total_seconds()
+                        > SUBMIT_TO_FAIL_GRACE_SECONDS)
+                ):
+                    accounting_ids.append(item.job_id)
+        return PollPlan(backend_name, sequence, queue, tuple(identities),
+                        tuple(dict.fromkeys(accounting_ids)))
+
+    def _claim_observation(self, plan: PollPlan) -> bool:
+        name = plan.backend_name
+        if plan.sequence <= self._observation_applied.get(name, 0):
+            return False
+        previous_time = self._observation_times.get(name)
+        if previous_time is not None and plan.queue.observed_at < previous_time:
+            return False
+        # A newer failed observation still supersedes older evidence.
+        self._observation_applied[name] = plan.sequence
+        self._observation_times[name] = plan.queue.observed_at
+        return True
+
+    async def apply_backend_observations(
+        self, observations: list[BackendObservation],
+    ) -> None:
+        """Own accounting, queue transitions, effects and scheduling for a cycle.
+
+        No submission locks are held around this operation: completion and
+        reconciliation acquire those locks themselves. Independent backends
+        have independent observation locks, also shared by compatibility calls.
+        """
+        for observation in observations:
+            plan = observation.plan
+            backend_name = plan.backend_name
+            lock = self._observation_locks.setdefault(backend_name, asyncio.Lock())
+            async with lock:
+                if not self._claim_observation(plan):
+                    continue
+                if not observation.fresh or not self.available(backend_name):
+                    continue
+                if observation.accounting_outcome == AccountingOutcome.SUCCEEDED:
+                    await self._apply_accounting(observation)
+                for run in list(self.runs.values()):
+                    if (run.backend_name != backend_name
+                            or run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED)):
+                        continue
+                    await self.submissions.reconcile(run)
+                    await self._apply_queue(run, plan)
+                # Preserve the fair first pass and greedy mop-up. Re-drive runs
+                # even when another run, rather than this one, freed a slot.
+                for run in self._contending_runs(backend_name):
+                    await self.process_run(run)
+                for run in self._contending_runs(backend_name):
+                    await self.process_run(run, fair_share=False)
+
+    async def _apply_accounting(self, observation: BackendObservation) -> None:
+        plan = observation.plan
+        backend = self.job_backends.get(plan.backend_name)
+        if backend is None:
+            return
+        stats = observation.accounting
+        live_ids = {job_id for job_id, _, _ in plan.queue.jobs}
+        now = plan.queue.observed_at
+        requested = set(plan.accounting_ids)
+        for run in list(self.runs.values()):
+            if run.backend_name != plan.backend_name:
+                continue
+            changed = False
+            reprocess = False
+            # Captured identities prevent generated work from inheriting the
+            # old queue/accounting snapshot during a completion hook.
+            captured = [(item, self._item_identity(run, item))
+                        for item in self._observed_items(run, plan)]
+            for item, identity in captured:
+                if (self.runs.get(run.id) is not run or not item.job_id
+                        or item.submission_unresolved or self._item_identity(run, item) != identity):
+                    continue
+                if item.job_id not in requested:
+                    continue
+                evidence = stats.get(item.job_id)
+                completed = False
+                if evidence is not None:
+                    item.cpu_efficiency = evidence.cpu_efficiency
+                    item.max_rss = evidence.max_rss
+                    if evidence.start_time:
+                        item.started_at = evidence.start_time
+                    if evidence.end_time:
+                        item.finished_at = evidence.end_time
+                    if evidence.state in backend.terminal_states:
+                        item.scheduler_state = evidence.state
+                    if evidence.exit_code is not None:
+                        item.exit_code = evidence.exit_code
+                    changed = True
+                    if (evidence.state in backend.failure_states
+                            and item.status == RunItemStatus.COMPLETED):
+                        item.status = RunItemStatus.FAILED
+                        item.error = f'Scheduler: {backend.failure_states[evidence.state]}'
+                    elif item.status in (RunItemStatus.SETTLING, RunItemStatus.SUBMITTED):
+                        if evidence.state == 'COMPLETED':
+                            item.started_at = item.started_at or item.submitted_at
+                            item.status = RunItemStatus.COMPLETED
+                            item.finished_at = evidence.end_time or now
+                            completed = reprocess = True
+                        elif evidence.state in backend.failure_states:
+                            item.started_at = item.started_at or item.submitted_at
+                            item.status = RunItemStatus.FAILED
+                            item.error = f'Scheduler: {backend.failure_states[evidence.state]}'
+                            item.finished_at = evidence.end_time or now
+                            reprocess = True
+                    elif (evidence.state == 'COMPLETED' and item.status == RunItemStatus.FAILED
+                          and item.error == DISAPPEARED_BEFORE_RUNNING_MARKER):
+                        item.status = RunItemStatus.COMPLETED
+                        item.error = None
+                        if run.uncascade_dep_failures():
+                            reprocess = True
+                        # Preserve legacy correction behavior: no completion
+                        # hook was run on this path before the refactor.
+                elif (item.status == RunItemStatus.SUBMITTED and item.job_id not in live_ids
+                      and item.submitted_at is not None
+                      and (now - item.submitted_at).total_seconds() > SUBMITTED_NO_RECORD_TIMEOUT_SECONDS):
+                    item.started_at = item.submitted_at
+                    item.status = RunItemStatus.FAILED
+                    item.error = SCHEDULER_NO_RECORD_MARKER
+                    item.finished_at = now
+                    changed = True
+                elif (item.status == RunItemStatus.SETTLING and item.finished_at is not None
+                      and (now - item.finished_at).total_seconds() > SETTLING_NO_RECORD_TIMEOUT_SECONDS):
+                    item.status = RunItemStatus.COMPLETED
+                    item.error = SETTLING_UNCONFIRMED_MARKER
+                    completed = reprocess = changed = True
+                if completed:
+                    await self._after_item_completed(run, item)
+            if changed and self.runs.get(run.id) is run:
+                self._persist_run(run)
+                self.notify_run(run.id)
+                if reprocess:
+                    await self.process_run(run)
+
     async def update_run_status(
-        self,
-        run: Run,
-        slurm_jobs: dict[str, JobState],
+        self, run: Run, slurm_jobs: dict[str, JobState],
         pending_reasons: dict[str, str] | None = None,
     ) -> None:
-        """Update run item statuses based on Slurm job states.
+        """Compatibility adapter for a queue-only update of an existing run."""
+        reasons = pending_reasons or {}
+        queue = QueueObservation(tuple((key, value, reasons.get(key))
+                                       for key, value in slurm_jobs.items()), datetime.now(UTC))
+        plan = self.plan_backend_observation(run.backend_name, queue)
+        lock = self._observation_locks.setdefault(run.backend_name, asyncio.Lock())
+        async with lock:
+            if self._claim_observation(plan):
+                await self._apply_queue(run, plan)
 
-        ``pending_reasons`` maps job_id -> the scheduler's reason a still-
-        pending job is waiting (squeue %R). Surfaced on QUEUED items and
-        cleared once they leave the queue.
-        """
-        pending_reasons = pending_reasons or {}
+    async def _apply_queue(self, run: Run, plan: PollPlan) -> None:
+        """Apply queue transitions to the still-current captured items."""
+        slurm_jobs = {job_id: status for job_id, status, _ in plan.queue.jobs}
+        pending_reasons = {job_id: reason for job_id, _, reason in plan.queue.jobs if reason}
         changed = False
-        changed_items: list[RunItem] = []
 
         # Snapshot items that existed before this update cycle.
         # _handle_generates_source (called below) may append new items and
         # submit them via process_run.  Those new jobs won't appear in the
         # current slurm_jobs dict, so checking them would falsely mark them
         # COMPLETED.  Only iterate over the pre-existing items.
-        items_snapshot = list(run.items)
+        items_snapshot = self._observed_items(run, plan)
 
         # State transitions are driven by *evidence*: what squeue reported
         # for the job. We deliberately never mark SUBMITTED as FAILED on
         # absence-from-squeue here — that's an absence-of-evidence, not
         # evidence-of-failure, and it triggers exactly the false-failure
         # cascade we're trying to avoid. The evidence-based sacct path
-        # (in main.poll_backend) resolves those cases.
+        # (in this manager) resolves those cases.
         for item in items_snapshot:
             if item.job_id is None or item.submission_unresolved:
                 continue
@@ -2295,7 +2506,7 @@ class RunManager:
                     # it's between "scheduler done" and "accounting
                     # confirmed". Move to SETTLING — the run stays
                     # non-terminal until sacct returns a row (handled
-                    # in main.poll_backend). This eliminates the
+                    # in this manager). This eliminates the
                     # transient COMPLETED→FAILED flip that broke
                     # `run watch --exit-status` automation.
                     item.started_at = item.started_at or item.submitted_at
@@ -2309,9 +2520,8 @@ class RunManager:
                     # resolution. We need *some* timestamp here so the
                     # long-grace fallback can decide when to give up
                     # waiting for accounting.
-                    item.finished_at = datetime.now(timezone.utc)
+                    item.finished_at = plan.queue.observed_at
                     changed = True
-                    changed_items.append(item)
                     logger.info(
                         f"Task '{item.task.id}' (job {item.job_id}) "
                         f"left scheduler queue — SETTLING (awaiting sacct)"
@@ -2319,7 +2529,7 @@ class RunManager:
                     # generates_source handling waits too — we don't
                     # want to spawn dependent tasks based on an
                     # unconfirmed completion. Triggers on the sacct
-                    # COMPLETED transition in main.poll_backend.
+                    # COMPLETED transition in this manager.
                 # SUBMITTED + missing: do nothing here. The item stays
                 # SUBMITTED until either it shows up in squeue or the
                 # sacct-evidence path resolves it. No timer, no marker,
@@ -2334,9 +2544,8 @@ class RunManager:
                     changed = True
                 if item.status != RunItemStatus.RUNNING:
                     item.status = RunItemStatus.RUNNING
-                    item.started_at = item.started_at or datetime.now(timezone.utc)
+                    item.started_at = item.started_at or plan.queue.observed_at
                     changed = True
-                    changed_items.append(item)
                     logger.info(
                         f"Task '{item.task.id}' (job {item.job_id}) started running"
                     )
@@ -2347,7 +2556,6 @@ class RunManager:
                 if item.status not in (RunItemStatus.QUEUED, RunItemStatus.RUNNING):
                     item.status = RunItemStatus.QUEUED
                     changed = True
-                    changed_items.append(item)
                     logger.info(
                         f"Task '{item.task.id}' (job {item.job_id}) "
                         f"acknowledged by scheduler — QUEUED"
@@ -2371,7 +2579,6 @@ class RunManager:
                 item.status = RunItemStatus.SETTLING
                 item.pending_reason = None  # no longer waiting
                 changed = True
-                changed_items.append(item)
                 logger.info(
                     f"Task '{item.task.id}' (job {item.job_id}) "
                     f"reported COMPLETED by scheduler — SETTLING (awaiting sacct)"
@@ -2390,9 +2597,8 @@ class RunManager:
                 item.status = RunItemStatus.FAILED
                 item.pending_reason = None  # no longer waiting
                 item.error = f"Slurm job {job_state.value}"
-                item.finished_at = datetime.now(timezone.utc)
+                item.finished_at = plan.queue.observed_at
                 changed = True
-                changed_items.append(item)
                 logger.info(
                     f"Task '{item.task.id}' (job {item.job_id}) "
                     f"failed: {job_state.value}"
@@ -2404,58 +2610,21 @@ class RunManager:
             self.notify_run(run.id)
 
     async def update_all_runs(
-        self, backend_jobs: dict[str, list[tuple]]
+        self, backend_jobs: dict[
+            str, list[tuple[str, JobState] | tuple[str, JobState, str | None]]
+        ],
     ) -> None:
-        """Update all active runs based on Slurm job states.
-
-        Each entry in a backend's list is ``(job_id, state)`` or
-        ``(job_id, state, reason)`` — the optional third element is the
-        scheduler's pending reason (squeue %R). Two-element tuples stay
-        supported so existing callers/tests don't break.
-        """
-        for run in self.runs.values():
-            if run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
-                continue
-
-            if run.backend_name not in backend_jobs or not self.available(run.backend_name):
-                continue
-            await self.submissions.reconcile(run)
-            jobs = backend_jobs[run.backend_name]
-            job_states: dict[str, JobState] = {}
-            pending_reasons: dict[str, str] = {}
-            for entry in jobs:
-                job_id, job_state = entry[0], entry[1]
-                job_states[job_id] = job_state
-                if len(entry) > 2 and entry[2]:
-                    pending_reasons[job_id] = entry[2]
-
-            await self.update_run_status(run, job_states, pending_reasons)
-
-        # Cross-run backpressure: a job finishing in one run frees a
-        # backend-level concurrency slot that a *different* run may be
-        # blocked on. update_run_status only re-drives the run whose own
-        # items changed, so a run sitting in PENDING purely because the
-        # backend cap was full would otherwise never be reconsidered when
-        # an unrelated run frees a slot — it would stay stuck forever.
-        # Re-drive every active run that still has submittable work.
-        # process_run recomputes the backend slot count and submits nothing
-        # when the cap is still full, so this is cheap and safe to run each
-        # poll; it also self-heals runs that are already stuck.
-        #
-        # Two passes per backend. Pass 1 is fair: each contending run gets at
-        # most an equal slice of the free slots, neediest run first, so a big
-        # run can't re-claim every freed slot ahead of a small one. Pass 2 is
-        # greedy, filling slots pass 1 left idle because a run's share exceeded
-        # its ready set — everyone already had a fair first bite, and leaving
-        # capacity unused is strictly worse.
-        backend_names = {run.backend_name for run in self.runs.values()}
-        for backend_name in sorted(backend_names):
-            if backend_name not in backend_jobs:
-                continue
-            for run in self._contending_runs(backend_name):
-                await self.process_run(run)
-            for run in self._contending_runs(backend_name):
-                await self.process_run(run, fair_share=False)
+        """Compatibility adapter for fresh queue-only observations."""
+        observations = []
+        for backend_name, jobs in backend_jobs.items():
+            queue = QueueObservation(tuple(
+                (entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in jobs
+            ), datetime.now(UTC))
+            plan = self.plan_backend_observation(backend_name, queue)
+            observations.append(BackendObservation(
+                replace(plan, accounting_ids=()), AccountingOutcome.NOT_REQUESTED,
+            ))
+        await self.apply_backend_observations(observations)
 
     def _has_submittable_items(self, run: Run) -> bool:
         """True if the run has PENDING items whose dependencies are satisfied."""
@@ -2473,6 +2642,7 @@ class RunManager:
                 raise SubmissionConflict("Resolve unknown submissions before cancelling this run")
             if not self.available(run.backend_name):
                 raise SubmissionConflict("Backend unavailable; cancellation was not sent")
+            self._invalidate_observations(run)
             return await self._cancel_run(run_id)
 
     async def _cancel_run(self, run_id: str) -> bool:

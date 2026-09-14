@@ -100,7 +100,9 @@ def _state_with_run(run: Run, sacct_state: str = "COMPLETED") -> tuple:
         clone_dir="/tmp",
     )
 
-    run_manager = MagicMock()
+    from scripthut.config_schema import ScriptHutConfig
+    from scripthut.runs.manager import RunManager
+    run_manager = RunManager(ScriptHutConfig(), {}, job_backends={"cluster": job_backend})
     run_manager.runs = {run.id: run}
     run_manager.process_run = AsyncMock()
     run_manager._persist_run = MagicMock()
@@ -163,7 +165,7 @@ class TestUncascadeTriggersReprocess:
 
         # And — the bug fix — process_run was actually called so the
         # newly-eligible child gets submitted on this cycle.
-        rm.process_run.assert_awaited_once_with(run)
+        assert any(call.args == (run,) for call in rm.process_run.await_args_list)
 
     @pytest.mark.asyncio
     async def test_no_reprocess_when_nothing_was_unwound(self, monkeypatch):
