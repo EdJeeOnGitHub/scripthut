@@ -1249,8 +1249,8 @@ async def backends_page(request: Request) -> HTMLResponse:
             "job_views": job_views,
             "backends": state.backends,
             "backend_usage": _backend_usage(),
-        "allocation_reports": allocation_reader.by_backend(),
-        "allocation_alerts": allocation_reader.alerts,
+            "allocation_reports": allocation_reader.by_backend(),
+            "allocation_alerts": allocation_reader.alerts,
             "status": ConnectionStatus(
                 connected=state.any_connected,
                 host=", ".join(c.status.host for c in state.backends.values() if c.status.connected),
@@ -1320,7 +1320,8 @@ async def jobs_stream(request: Request) -> EventSourceResponse:
                 yield {"event": "jobs-update", "data": html}
 
                 backends_html = templates.get_template("backends_status.html").render(
-                    {"request": request, "backends": state.backends, "backend_usage": _backend_usage()}
+                    {"request": request, "backends": state.backends, "backend_usage": _backend_usage(),
+                     "allocation_reports": allocation_reader.by_backend(), "allocation_alerts": allocation_reader.alerts}
                 )
                 yield {"event": "backends-update", "data": backends_html}
             else:
