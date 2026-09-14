@@ -2974,9 +2974,8 @@ async def get_task_output_file(
     "this file doesn't exist", which leaks less information).
 
     Reads via SSH from the backend (Slurm + PBS only in v0.11.0;
-    Batch / EC2 are v2). Capped at ``_OUTPUTS_FILE_MAX_BYTES``; the
-    listing already drops >5 MB files, so this is the belt-and-
-    suspenders limit if someone hits the endpoint directly.
+    Batch / EC2 are v2). PDFs have no per-file size cap. Other formats
+    are capped at ``_OUTPUTS_FILE_MAX_BYTES`` on direct downloads.
     """
     import os
     import posixpath
@@ -3021,7 +3020,7 @@ async def get_task_output_file(
         size = int(size_out.strip())
     except ValueError:
         return Response(status_code=404)
-    if size > _OUTPUTS_FILE_MAX_BYTES:
+    if size > _OUTPUTS_FILE_MAX_BYTES and not rel_path.lower().endswith(".pdf"):
         return Response(status_code=413)
 
     # Use base64 to survive binary content over the SSH stdout text

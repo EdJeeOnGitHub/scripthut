@@ -379,11 +379,8 @@ class RunManager:
 
         await self.process_run(run)
 
-    # Maximum file size we'll surface in the per-task outputs panel.
-    # Larger files are dropped from the listing — the user can still
-    # access them through their own paths, scripthut just doesn't try
-    # to embed or render them. Matches the size cap documented in the
-    # v0.11.0 plan; revisit if real workloads need bigger payloads.
+    # PDFs are download-only outputs and have no per-file size cap.
+    # Keep the listing cap for other output formats.
     _OUTPUTS_MAX_FILE_BYTES = 5 * 1024 * 1024
 
     # Cap the number of files the listing surfaces so a runaway
@@ -468,7 +465,7 @@ class RunManager:
                 size = int(size_str)
             except ValueError:
                 continue
-            if size > self._OUTPUTS_MAX_FILE_BYTES:
+            if size > self._OUTPUTS_MAX_FILE_BYTES and not path_rel.lower().endswith(".pdf"):
                 # Skip oversize files but log so users notice the cap.
                 logger.info(
                     f"Task '{item.task.id}': output '{path_rel}' is "
