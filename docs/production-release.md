@@ -19,3 +19,11 @@ Agent-infra owns the release manifest, host configuration, build receipts and st
 rollout. Its manifest pins this repository's full commit and release tag. Every
 candidate and promotion uses the exact locally built image from its validated
 receipt; independently rebuilt images need their own validation.
+
+The maintained production release targets Linux containers. Production-branch CI
+runs the full suite on Linux with Python 3.11, 3.12 and 3.13. Unix sockets, POSIX
+file locks and host OpenSSH integration are requirements; native Windows hosting
+is not supported by this release. Main/develop retain their existing CI matrix.
+The first published tag's Linux jobs passed; its inherited Windows jobs exposed
+this platform mismatch. The branch's subsequent CI-only correction does not change
+the tagged application or image recipe.

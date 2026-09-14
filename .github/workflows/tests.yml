@@ -11,7 +11,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Production is a Linux container with POSIX sockets, locks and SSH.
+        # Keep upstream development's existing platform matrix unchanged.
+        os: ${{ fromJSON((github.ref == 'refs/heads/production' || github.base_ref == 'production') && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
         python-version: ['3.11', '3.12', '3.13']
 
     steps:
