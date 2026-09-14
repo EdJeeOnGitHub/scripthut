@@ -204,16 +204,17 @@ def test_websocket_origin_session_and_secret_log_exclusion(monkeypatch, caplog):
             ws.send_json({"type": "input", "data": "VERY_SECRET\n"})
             # A resize acknowledges an input boundary without echoing secrets.
             ws.send_json({"type": "resize", "cols": 80, "rows": 24})
+            # Deliver a disconnect while the test server is still alive. Exiting
+            # TestClient's websocket context cancels the ASGI task itself and can
+            # interrupt cleanup, unlike a browser's ordinary disconnect event.
+            ws.close()
+            deadline = time.monotonic() + 2
+            while client.get(f"/login/attempt/{attempt['id']}").json()["state"] != "cancelled":
+                assert time.monotonic() < deadline, "Websocket disconnect did not cancel authentication"
+                time.sleep(0.01)
         assert "VERY_SECRET" not in caplog.text
         assert "Password:" not in caplog.text
         host.run_command.assert_not_called()
-        # Closing the websocket schedules helper cleanup; the watcher completes
-        # asynchronously. Observe the public state without assuming TestClient
-        # drains all background tasks before its context manager returns.
-        deadline = time.monotonic() + 2
-        while client.get(f"/login/attempt/{attempt['id']}").json()["state"] != "cancelled":
-            assert time.monotonic() < deadline, "Websocket disconnect did not cancel authentication"
-            time.sleep(0.01)
         assert processes[0].returncode is not None
 
 

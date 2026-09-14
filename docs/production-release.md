@@ -5,7 +5,7 @@ by agent-infra. Changes go through this branch and its test workflow before rele
 Upstream integration is separate; deployment does not apply external patches.
 
 Production tags use `production-YYYY-MM-DD.N` and are annotated and immutable.
-Create a tag only after the test suite and candidate acceptance pass. Never move
+Publish a tag only after the test suite and candidate acceptance pass. Never move
 an existing release tag; corrections require a new release.
 
 `Containerfile.production` is the supported local production build. Build from a
