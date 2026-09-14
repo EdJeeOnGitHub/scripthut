@@ -500,3 +500,45 @@ class TestFileEndpointPathTraversal:
     def test_dotdot_alone_rejected(self):
         """The empty-target traversal still fails containment."""
         assert self._is_inside("..") is False
+
+
+@pytest.mark.asyncio
+async def test_large_pdfs_remain_in_output_listing():
+    ssh = MagicMock()
+    ssh.run_command = AsyncMock(return_value=(
+        "report.pdf\t50000000\nREPORT.PDF\t60000000\nlarge.png\t50000000\n", "", 0,
+    ))
+    mgr, run, item = _make_manager_with_one_item(ssh)
+    await mgr._handle_task_outputs(run, item)
+    assert [(o.path, o.size, o.kind) for o in item.outputs] == [
+        ("report.pdf", 50000000, "other"), ("REPORT.PDF", 60000000, "other"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["report.pdf", "REPORT.PDF", "report.png"])
+async def test_large_pdf_download(filename, monkeypatch):
+    import base64
+    from types import SimpleNamespace
+    import scripthut.main as main
+
+    content = b"%PDF-1.7\n" + b"x" * (11 * 1024 * 1024)
+    ssh = MagicMock()
+    ssh.run_command = AsyncMock(side_effect=[
+        (str(len(content)), "", 0),
+        (base64.b64encode(content).decode(), "", 0),
+    ])
+    mgr, run, item = _make_manager_with_one_item(ssh)
+    mgr.runs[run.id] = run
+    monkeypatch.setattr(main.state, "run_manager", mgr)
+    monkeypatch.setattr(main.state, "backends", {
+        run.backend_name: SimpleNamespace(ssh_client=ssh),
+    })
+    response = await main.get_task_output_file(run.id, item.task.id, filename)
+    if filename.endswith(".png"):
+        assert response.status_code == 413
+        assert ssh.run_command.await_count == 1
+    else:
+        assert response.status_code == 200
+        assert response.media_type == "application/pdf"
+        assert response.body == content
