@@ -21,6 +21,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
+from scripthut.reports.allocations import AllocationReader
+
+allocation_reader = AllocationReader()
+
 from scripthut import __version__
 from scripthut.backends.base import JobStats
 from scripthut.browser_login import LoginManager, make_login_router
@@ -1187,6 +1191,7 @@ def _overview_context(request: Request) -> dict[str, Any]:
         "hourly": build_hourly_usage(records),
         "backends": state.backends,
         "backend_usage": _backend_usage(),
+        "allocation_reports": allocation_reader.by_backend(),
     }
 
 
@@ -1243,6 +1248,7 @@ async def backends_page(request: Request) -> HTMLResponse:
             "job_views": job_views,
             "backends": state.backends,
             "backend_usage": _backend_usage(),
+        "allocation_reports": allocation_reader.by_backend(),
             "status": ConnectionStatus(
                 connected=state.any_connected,
                 host=", ".join(c.status.host for c in state.backends.values() if c.status.connected),

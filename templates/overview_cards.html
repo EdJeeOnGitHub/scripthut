@@ -1,3 +1,4 @@
+{% from '_allocation.html' import allocation_bar %}
 {% from '_status.html' import status_dot, status_bar %}
 {#
   Landing-page body, in order: activity, backends, current runs, recent
@@ -321,6 +322,7 @@
                 </div>
             </div>
 
+            {% for a in (allocation_reports | default({})).get(name, []) %}{{ allocation_bar(a) }}{% endfor %}
             <!-- Cluster + disk meters -->
             <div class="mt-4 space-y-2">
                 {% set ci = backend.status.cluster_info %}
