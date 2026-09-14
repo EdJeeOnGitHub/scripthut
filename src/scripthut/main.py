@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
+from scripthut.reports.attribution import project_name
 from scripthut.reports.allocations import AllocationReader
 
 allocation_reader = AllocationReader()
@@ -500,6 +501,7 @@ async def _finish_startup(config: ScriptHutConfig) -> None:
         # days; afterwards it just catches anything the final hourly flush
         # missed before the process last exited.
         state.usage_log.record(state.run_manager.runs.values())
+        state.run_storage.efficiency_store.safe_record(state.run_manager.runs.values())
 
         # Record existing runs/failures so we don't announce them as "new" —
         # only transitions from here on generate notifications.
@@ -762,6 +764,7 @@ app.include_router(make_login_router(state))
 # Templates
 templates_path = Path(__file__).parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_path))
+templates.env.globals["project_name"] = project_name
 templates.env.globals["scripthut_version"] = __version__
 
 from scripthut.artifact_views import make_artifact_views
@@ -1194,6 +1197,41 @@ def _overview_context(request: Request) -> dict[str, Any]:
         "allocation_reports": allocation_reader.by_backend(),
         "allocation_alerts": allocation_reader.alerts,
     }
+
+
+@app.get("/efficiency", response_class=HTMLResponse)
+async def efficiency_page(request: Request, start: str = "", end: str = "",
+                          backend: str = "", project: str = "", workflow: str = "",
+                          sort: str = "allocated_hours") -> HTMLResponse:
+    from scripthut.reports.efficiency import report
+    from scripthut.reports.resources import ResourceUsage
+    today = datetime.now(UTC).date()
+    start = start or (today - timedelta(days=29)).isoformat()
+    end = end or today.isoformat()
+    error = None
+    rows = []
+    try:
+        beginning = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
+        ending = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
+        if ending <= beginning:
+            raise ValueError("End date must be on or after start date")
+        if state.run_storage:
+            store = state.run_storage.efficiency_store
+            runs = list(state.run_manager.runs.values()) if state.run_manager else []
+            await asyncio.to_thread(store.safe_record, runs)
+            rows = await asyncio.to_thread(store.records, beginning, ending,
+                backend=backend, project=project, workflow=workflow)
+    except ValueError as exc:
+        error = str(exc)
+    except Exception:
+        logger.exception("Efficiency report unavailable")
+        error = "Efficiency history is temporarily unavailable."
+    return templates.TemplateResponse("efficiency.html", {
+        "request": request, "report": report(rows, sort), "error": error,
+        "filters": dict(start=start, end=end, backend=backend, project=project, workflow=workflow, sort=sort),
+        "resources": ResourceUsage.from_dict,
+        "live_run_ids": set(state.run_manager.runs) if state.run_manager else set(),
+    }, status_code=400 if error and not rows else 200)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2844,6 +2882,7 @@ async def get_task_detail(
             "error": item.error,
             "cpu_efficiency": item.cpu_efficiency,
             "max_rss": item.max_rss,
+            "resource_usage": item.resource_usage.to_dict() if item.resource_usage else None,
         }
         content = json.dumps(item_data, indent=2)
     else:

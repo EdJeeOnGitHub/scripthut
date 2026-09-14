@@ -1672,6 +1672,8 @@ class RunManager:
         if run.status in (RunStatus.RUNNING, RunStatus.PENDING):
             raise ValueError("Cannot rerun a run that is still active")
 
+        if self.storage:
+            self.storage.efficiency_store.safe_record([run])
         self._invalidate_observations(run)
         # Reset all items to pending
         for item in run.items:
@@ -1683,6 +1685,7 @@ class RunManager:
             item.error = None
             item.submit_script = None
             item.submit_output = None
+            item.resource_usage = None
             item.cpu_efficiency = None
             item.max_rss = None
             item.scheduler_state = None
@@ -2393,6 +2396,7 @@ class RunManager:
                 evidence = stats.get(item.job_id)
                 completed = False
                 if evidence is not None:
+                    item.resource_usage = evidence.resource_usage
                     item.cpu_efficiency = evidence.cpu_efficiency
                     item.max_rss = evidence.max_rss
                     if evidence.start_time:

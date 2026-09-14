@@ -1,0 +1,9 @@
+{% macro job_efficiency(u) %}
+{% if u %}
+<div class="text-xs text-gray-600 space-y-1">
+  <div>CPU {% if u.cpu_efficiency is not none %}{{ '%.1f'|format(u.cpu_efficiency) }}%{% else %}unavailable{% endif %}{% if u.average_cores is not none %} · {{ '%.2f'|format(u.average_cores) }} cores average{% endif %}</div>
+  <div>Reported RAM peak {% if u.reported_peak_bytes is not none %}{{ '%.2f'|format(u.reported_peak_bytes / 1073741824) }} GiB{% else %}unavailable{% endif %}{% if u.memory_percent is not none %} / {{ '%.2f'|format((u.allocated_memory_bytes or u.requested_memory_bytes) / 1073741824) }} GiB ({{ '%.1f'|format(u.memory_percent) }}%){% endif %}</div>
+  <div class="text-gray-400">{{ u.source }} · {{ 'single-task job peak' if u.memory_scope == 'single_task_job' else 'task peak; whole-job comparison unavailable' }}. Mean RAM over time unavailable.</div>
+</div>
+{% endif %}
+{% endmacro %}
