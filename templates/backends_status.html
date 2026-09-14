@@ -91,10 +91,6 @@
         {% if q and q.account %}
         <span class="text-gray-400">account <span class="font-mono text-gray-600">{{ q.account }}</span></span>
         {% endif %}
-        {% if backend.status.cpus_idle is not none %}
-        <span class="text-gray-300">·</span>
-        <span><span class="font-medium">{{ backend.status.cpus_idle }}</span> CPUs free</span>
-        {% endif %}
         {% if backend.status.disk_avail_bytes is not none and backend.status.disk_total_bytes %}
         {% set disk_used_pct = ((backend.status.disk_total_bytes - backend.status.disk_avail_bytes) * 100 / backend.status.disk_total_bytes) | round(0, 'floor') | int %}
         <span class="{% if disk_used_pct >= 90 %}text-red-600{% elif disk_used_pct >= 75 %}text-yellow-600{% else %}text-gray-600{% endif %}"

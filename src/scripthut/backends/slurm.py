@@ -629,6 +629,13 @@ class SlurmBackend(JobBackend):
             partitions=partitions,
             pending_reasons=pending_reasons,
             user_quota=user_quota,
+            overview_partition_names=sorted({
+                name.strip()
+                for value in [self._default_partition, *self._partition_map.values()]
+                if value
+                for name in value.split(",")
+                if name.strip()
+            }) or None,
         )
 
     async def _fetch_partitions(self) -> list[PartitionInfo] | None:
