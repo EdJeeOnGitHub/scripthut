@@ -323,21 +323,37 @@
 
             <!-- Cluster + disk meters -->
             <div class="mt-4 space-y-2">
-                {% if backend.status.cpus_total %}
-                {% set cpus_busy = backend.status.cpus_total - backend.status.cpus_idle %}
-                {% set cluster_pct = (cpus_busy * 100 / backend.status.cpus_total) | round(0, 'floor') | int %}
+                {% set ci = backend.status.cluster_info %}
+                {% if ci %}
+                <div class="text-xs text-gray-500" title="Partitions may share nodes. Counts are shown separately, never added together. These are scheduler allocations, not measured CPU activity or account quotas.">
+                    {% if ci.overview_partition_names is not none %}Configured partitions{% else %}Resources by partition{% endif %}
+                </div>
+                {% set overview_partitions = ci.overview_partitions %}
+                {% for p in overview_partitions[:3] %}
+                {% if p.cpus_total %}
+                {% set allocated_pct = (p.cpus_allocated * 100 / p.cpus_total) | round(0, 'floor') | int %}
+                {% set unavailable_pct = (p.cpus_other * 100 / p.cpus_total) | round(0, 'floor') | int %}
                 <div>
-                    <div class="flex items-baseline justify-between text-xs mb-0.5">
-                        <span class="text-gray-500">Cluster</span>
+                    <div class="flex flex-wrap items-baseline justify-between gap-x-2 text-xs mb-0.5">
+                        <span class="text-gray-500">{{ p.name }}{% if p.state != 'up' %} ({{ p.state }}){% endif %}</span>
                         <span class="text-gray-600 font-mono">
-                            {{ cluster_pct }}% busy · <span class="font-medium">{{ backend.status.cpus_idle }}</span> CPUs free
+                            {{ allocated_pct }}% allocated · <span class="font-medium">{{ p.cpus_idle }}</span> CPUs idle{% if p.cpus_other %} · {{ p.cpus_other }} unavailable{% endif %}
                         </span>
                     </div>
-                    <div class="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div class="h-full {% if cluster_pct >= 95 %}bg-red-500{% elif cluster_pct >= 80 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
-                            style="width: {{ cluster_pct }}%"></div>
+                    <div class="flex w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div class="h-full {% if allocated_pct >= 95 %}bg-red-500{% elif allocated_pct >= 80 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
+                            style="width: {{ allocated_pct }}%"></div>
+                        <div class="h-full bg-gray-400" title="Unavailable CPUs"
+                            style="width: {{ unavailable_pct }}%"></div>
                     </div>
                 </div>
+                {% endif %}
+                {% else %}
+                <div class="text-xs text-gray-500">Partition availability not reported.</div>
+                {% endfor %}
+                {% if overview_partitions | length > 3 %}
+                <a href="/backends" class="block text-xs text-blue-600 hover:text-blue-800">{{ overview_partitions | length - 3 }} more partitions →</a>
+                {% endif %}
                 {% endif %}
 
                 {% if backend.status.disk_total_bytes and backend.status.disk_avail_bytes is not none %}
