@@ -166,9 +166,31 @@ class AWSEC2Config(BaseModel):
     region: str = Field(description="AWS region")
 
 
+class BackendStorageConfig(BaseModel):
+    """Backend filesystem roots; consumers own their namespaced lifecycle policy."""
+
+    scratch_dir: str
+    persistent_dir: str
+
+    @field_validator("scratch_dir", "persistent_dir")
+    @classmethod
+    def contained_absolute_root(cls, value: str) -> str:
+        if (
+            not value.startswith("/")
+            or value == "/"
+            or ".." in Path(value).parts
+            or "\x00" in value
+        ):
+            raise ValueError(
+                "Storage roots must be non-root absolute paths without parent traversal"
+            )
+        return value.rstrip("/")
+
+
 class SlurmBackendConfig(BaseModel):
     """Slurm backend configuration."""
 
+    storage: BackendStorageConfig | None = None
     name: str = Field(description="Unique identifier for this backend")
     type: Literal["slurm"] = "slurm"
     ssh: SSHConfig = Field(description="SSH connection settings")
@@ -230,6 +252,7 @@ class SlurmBackendConfig(BaseModel):
 class PBSBackendConfig(BaseModel):
     """PBS/Torque backend configuration."""
 
+    storage: BackendStorageConfig | None = None
     name: str = Field(description="Unique identifier for this backend")
     type: Literal["pbs"] = "pbs"
     ssh: SSHConfig = Field(description="SSH connection settings")

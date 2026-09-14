@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from scripthut.runs.models import (
     TaskDefinition,
     derive_source_name,
 )
+from scripthut.runs.request_journal import RequestJournal
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ class RunStorageManager:
         # Cache for loaded weekly runs (backend_name -> {week_id -> Run})
         self._weekly_cache: dict[str, dict[str, Run]] = {}
 
+    @cached_property
+    def request_journal(self) -> RequestJournal | None:
+        """One journal owns retention decisions for all storage deletion paths."""
+        return RequestJournal(self.base_dir) if os.name == "posix" else None
+
     # --- Path helpers ---
 
     def _sanitize_name(self, name: str) -> str:
@@ -85,7 +92,8 @@ class RunStorageManager:
         """Write run.json atomically."""
         # Later dirty saves must not replace a durable attempt with an
         # unflushed file. Keep the durability guarantee for the run's lifetime.
-        sync = durable or run.interactive_wait or any(i.submission_attempts for i in run.items)
+        sync = (durable or run.request_key is not None or run.interactive_wait
+                or any(i.submission_attempts for i in run.items))
         if run.workflow_name == "_default":
             # Weekly bins use a different directory structure
             # Determine the week from created_at
@@ -127,6 +135,8 @@ class RunStorageManager:
             "agent_session": run.agent_session,
             "agent_mode": run.agent_mode,
             "agent_session_name": run.agent_session_name,
+            "artifact_refs": run.artifact_refs,
+            "request_key": run.request_key,
             "items": [item.to_dict() for item in run.items],
         }
 
@@ -204,6 +214,8 @@ class RunStorageManager:
                 agent_session=data.get("agent_session", False),
                 agent_mode=data.get("agent_mode"),
                 agent_session_name=data.get("agent_session_name"),
+                artifact_refs=data.get("artifact_refs"),
+                request_key=data.get("request_key"),
             )
         except Exception as e:
             logger.error(f"Failed to load run from {run_dir}: {e}")
@@ -254,7 +266,9 @@ class RunStorageManager:
         ]
 
     def delete_run(self, run: Run) -> bool:
-        """Delete a run's directory."""
+        """Delete a run's directory unless its archival contract protects it."""
+        if self.request_journal is not None and self.request_journal.protected(run.id):
+            return False
         if run.workflow_name == "_default":
             run_dir = self._weekly_run_dir(run.backend_name, run.created_at)
         else:
@@ -538,9 +552,11 @@ class RunStorageManager:
                 # Only remove terminal runs
                 if run.status.value not in ("completed", "failed", "cancelled"):
                     continue
+                if self.request_journal is not None and self.request_journal.protected(run.id):
+                    continue
                 if run.created_at < cutoff:
-                    shutil.rmtree(run_dir)
-                    removed += 1
+                    if self.delete_run(run):
+                        removed += 1
 
             # Remove empty workflow directories
             if wf_dir.exists() and not any(wf_dir.iterdir()):

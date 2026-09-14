@@ -15,7 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scripthut.config_schema import (
     BatchBackendConfig,
@@ -26,6 +26,7 @@ from scripthut.config_schema import (
     SlurmBackendConfig,
 )
 from scripthut.runs.models import Run, RunItemStatus
+from scripthut.runs.request_journal import RequestBusy, RequestConflict, RequestJournal
 from scripthut.submission import SubmissionConflict
 
 if TYPE_CHECKING:
@@ -76,6 +77,18 @@ def _run_summary(run: Run) -> dict[str, Any]:
     }
 
 
+class AdhocSubmissionRequest(BaseModel):
+    """Validate top-level options without changing the hashed wire payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task: dict[str, Any]
+    backend: str = Field(min_length=1)
+    run_name: str | None = None
+    request_key: str | None = None
+    retain_until_archived: bool = False
+    artifact_refs: dict[str, Any] | None = None
+
+
 class SubmissionResolutionRequest(BaseModel):
     attempt_id: str
     action: str = "check"
@@ -120,6 +133,39 @@ def make_api_router(state: AppState) -> APIRouter:
             )
         return state.run_manager
 
+    @router.get("/capabilities")
+    async def capabilities() -> dict[str, Any]:
+        journal = _require_manager().request_journal
+        return {
+            "schema_version": 1,
+            "capabilities": {
+                "backend_storage": 1,
+                "keyed_submission": 1 if journal is not None else 0,
+                "archive_acknowledgement": 1 if journal is not None else 0,
+                "artifact_references": 1 if journal is not None else 0,
+            },
+            "journal_id": journal.journal_id if journal is not None else None,
+        }
+
+    def require_journal(expected: str | None = None) -> RequestJournal:
+        journal = _require_manager().request_journal
+        if journal is None:
+            raise HTTPException(503, "Persistent submission journal unavailable")
+        if expected is not None and expected != journal.journal_id:
+            raise HTTPException(409, detail={"code": "journal_mismatch"})
+        return journal
+
+    @router.post("/submission-requests")
+    async def submit_request(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        expected = request.headers.get("X-ScriptHut-Journal-ID")
+        if not expected:
+            raise HTTPException(428, "X-ScriptHut-Journal-ID is required")
+        require_journal(expected)
+        if not isinstance(payload.get("request_key"), str):
+            raise HTTPException(422, "request_key is required")
+        result = await run_adhoc_task(payload)
+        return {**result, "journal_id": expected, "request_key": payload["request_key"]}
+
     @router.get("/health")
     async def health() -> dict[str, Any]:
         # isinstance (not a bare getattr) so MagicMock states in tests and
@@ -146,11 +192,15 @@ def make_api_router(state: AppState) -> APIRouter:
             bs = state.backends.get(cfg.name)
             connected = bs.status.connected if bs else False
             backend_type = bs.backend_type if bs else _backend_kind(cfg)
+            storage = (
+                cfg.storage if isinstance(cfg, (SlurmBackendConfig, PBSBackendConfig)) else None
+            )
             result.append({
                 "name": cfg.name,
                 "type": backend_type,
                 "connected": connected,
                 "max_concurrent": getattr(cfg, "max_concurrent", None),
+                "storage": storage.model_dump() if storage is not None else None,
             })
         return {"backends": result}
 
@@ -240,7 +290,7 @@ def make_api_router(state: AppState) -> APIRouter:
         }
 
     @router.post("/tasks/run")
-    async def run_adhoc_task(payload: dict) -> dict[str, Any]:
+    async def run_adhoc_task(payload: dict[str, Any]) -> dict[str, Any]:
         """Submit a single ad-hoc task as a one-item run.
 
         ``payload`` must contain a ``task`` object matching the
@@ -251,6 +301,14 @@ def make_api_router(state: AppState) -> APIRouter:
         from scripthut.runs.models import TaskDefinition
 
         rm = _require_manager()
+        try:
+            AdhocSubmissionRequest.model_validate(payload)
+            if payload.get("request_key") is None and (
+                "retain_until_archived" in payload or "artifact_refs" in payload
+            ):
+                raise ValueError("Retention and artifact options require a request_key")
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         task_dict = payload.get("task")
         backend = payload.get("backend")
         run_name = payload.get("run_name")
@@ -264,7 +322,51 @@ def make_api_router(state: AppState) -> APIRouter:
         except (KeyError, ValueError) as e:
             raise HTTPException(status_code=422, detail=f"invalid task: {e}")
         try:
-            run = await rm.create_adhoc_run(task, backend, run_name=run_name)
+            key = payload.get("request_key")
+            if key is not None:
+                require_journal()
+                if set(payload) - {
+                    "task",
+                    "backend",
+                    "run_name",
+                    "request_key",
+                    "retain_until_archived",
+                    "artifact_refs",
+                }:
+                    raise ValueError("Unsupported keyed submission fields")
+                from scripthut.artifact_refs import snapshot
+
+                references = snapshot(payload.get("artifact_refs"))
+                if references and references["outputs"]:
+                    raise ValueError(
+                        "Outputs are attached after execution, not at submission"
+                    )
+                if type(payload.get("retain_until_archived", False)) is not bool:
+                    raise ValueError("retain_until_archived must be boolean")
+                semantic = {k: v for k, v in payload.items() if k != "request_key"}
+                run = await rm.create_keyed_adhoc_run(key, semantic)
+                if run is None:
+                    record = require_journal().lookup(key)
+                    assert record is not None
+                    return {
+                        "id": record["run_id"],
+                        "status": "history_expired",
+                        "request_key": key,
+                    }
+            else:
+                if payload.get("artifact_refs"):
+                    raise ValueError(
+                        "Artifact references require a durable keyed submission"
+                    )
+                run = await rm.create_adhoc_run(task, backend, run_name=run_name)
+        except HTTPException:
+            raise
+        except RequestConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except RequestBusy as e:
+            raise HTTPException(
+                status_code=503, detail=str(e), headers={"Retry-After": "1"}
+            )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except Exception as e:
@@ -272,6 +374,64 @@ def make_api_router(state: AppState) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(e))
         state.notify_poll()
         return _run_summary(run)
+
+    @router.get("/submission-requests/{key:path}")
+    async def lookup_submission_request(key: str, request: Request) -> dict[str, Any]:
+        journal = require_journal(request.headers.get("X-ScriptHut-Journal-ID"))
+        try:
+            record = journal.lookup(key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "request_key_not_found", "journal_id": journal.journal_id},
+            )
+        return {
+            **{
+                name: record[name]
+                for name in ("key", "digest", "run_id", "phase", "archive_receipt")
+            },
+            "journal_id": journal.journal_id,
+        }
+
+    @router.post("/submission-requests/{key:path}/archive")
+    async def acknowledge_submission_archive(
+        key: str, payload: dict[str, Any], request: Request
+    ) -> dict[str, Any]:
+        rm = _require_manager()
+        journal = require_journal(request.headers.get("X-ScriptHut-Journal-ID"))
+        try:
+            record = journal.lookup(key)
+            if record is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "code": "request_key_not_found",
+                        "journal_id": journal.journal_id,
+                    },
+                )
+            run = rm.get_run(record["run_id"])
+            if run is not None and run.status.value not in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                raise ValueError("Cannot acknowledge archival of nonterminal work")
+            if run is None and record["archive_receipt"] is None:
+                raise ValueError(
+                    "Terminal execution record missing; cannot verify archival eligibility"
+                )
+            journal.acknowledge(key, payload.get("archive_receipt_sha256"))
+        except RequestConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {
+            "acknowledged": True,
+            "run_id": record["run_id"],
+            "journal_id": journal.journal_id,
+        }
 
     @router.post("/tasks/probe")
     async def probe_tasks_v1(payload: dict) -> dict[str, Any]:
@@ -639,9 +799,23 @@ def make_api_router(state: AppState) -> APIRouter:
         summary["log_dir"] = run.log_dir
         summary["account"] = run.account
         summary["commit_hash"] = run.commit_hash
+        summary['artifact_refs'] = run.artifact_refs
         summary["git_repo"] = run.git_repo
         summary["git_branch"] = run.git_branch
         return summary
+
+    @router.post("/runs/{run_id}/artifacts")
+    async def attach_artifact_outputs(
+        run_id: str, payload: dict[str, Any], request: Request
+    ) -> dict[str, Any]:
+        require_journal(request.headers.get("X-ScriptHut-Journal-ID"))
+        try:
+            references = await _require_manager().attach_artifact_outputs(run_id, payload)
+            return {"run_id": run_id, "artifact_refs": references}
+        except KeyError:
+            raise HTTPException(404, "Run not found")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
 
     @router.get("/runs/{run_id}/tasks/{task_id}/manifest")
     async def get_task_manifest_v1(run_id: str, task_id: str) -> dict[str, Any]:
