@@ -40,14 +40,7 @@ from scripthut.runs.activity import (
     build_activity_grid,
     build_hourly_usage,
 )
-from scripthut.runs.manager import (
-    DISAPPEARED_BEFORE_RUNNING_MARKER,
-    SCHEDULER_NO_RECORD_MARKER,
-    SETTLING_NO_RECORD_TIMEOUT_SECONDS,
-    SETTLING_UNCONFIRMED_MARKER,
-    SUBMIT_TO_FAIL_GRACE_SECONDS,
-    SUBMITTED_NO_RECORD_TIMEOUT_SECONDS,
-)
+from scripthut.runs.observations import AccountingOutcome, BackendObservation, QueueObservation
 from scripthut.runs.models import RunItemStatus, RunStatus
 from scripthut.runs.storage import RunStorageManager
 from scripthut.runs.usage import UsageLog, merged_records, window_start
@@ -209,6 +202,8 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             return
 
     start_time = time.perf_counter()
+    observed_at = datetime.now(UTC)
+    plan = None
     try:
         jobs = await backend_state.backend.get_jobs(user=filter_user)
         cluster_info = await backend_state.backend.get_cluster_info(user=backend_state.current_user)
@@ -233,295 +228,22 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
         )
         logger.debug(f"Polled {len(jobs)} jobs from '{backend_state.name}' in {duration_ms}ms")
 
-        # Collect job_ids that need an accounting (sacct) lookup. Three
-        # phases share the same query so the SSH round-trip is shared:
-        #
-        #   A) Items already in a terminal state (COMPLETED/FAILED) whose
-        #      scheduler_state isn't confirmed yet — we want resource
-        #      stats and a chance to correct a false COMPLETED to FAILED.
-        #
-        #   B) Items still in SUBMITTED that have been missing from
-        #      squeue past the grace period — *evidence-based* resolution
-        #      of the "vanished" case (replaces the speculative FAILED-
-        #      with-marker pattern). sacct will tell us whether they
-        #      ran to completion, failed for a real reason, or were
-        #      dropped by the scheduler entirely.
-        #
-        #   C) Items in SETTLING (added in v0.10.0): the scheduler said
-        #      the job is done but accounting hasn't confirmed the real
-        #      outcome yet. Until sacct returns a row, the item stays
-        #      non-terminal so `run watch --exit-status` doesn't race
-        #      a transient COMPLETED → FAILED flip. Falls back to
-        #      COMPLETED (without a confirmed exit code) after a long
-        #      grace if accounting still hasn't surfaced — better than
-        #      a permanently stuck run.
-        sacct_ids: list[str] = []
-        live_job_ids: set[str] = {j.job_id for j in jobs if j.job_id}
-        now_utc = datetime.now(UTC)
-        if state.run_manager:
-            for run in state.run_manager.runs.values():
-                if run.backend_name != backend_state.name:
-                    continue
-                for item in run.items:
-                    if not item.job_id:
-                        continue
-                    # Phase A
-                    if (
-                        item.status in (RunItemStatus.COMPLETED, RunItemStatus.FAILED)
-                        and item.scheduler_state is None
-                    ):
-                        sacct_ids.append(item.job_id)
-                        continue
-                    # Phase B
-                    if (
-                        item.status == RunItemStatus.SUBMITTED
-                        and item.job_id not in live_job_ids
-                        and item.submitted_at is not None
-                    ):
-                        submit_age = (now_utc - item.submitted_at).total_seconds()
-                        if submit_age > SUBMIT_TO_FAIL_GRACE_SECONDS:
-                            sacct_ids.append(item.job_id)
-                        continue
-                    # Phase C
-                    if item.status == RunItemStatus.SETTLING:
-                        sacct_ids.append(item.job_id)
-
-        # Query accounting for resource utilization
         job_stats: dict[str, JobStats] = {}
-        if sacct_ids:
-            logger.info(f"Fetching stats for {len(sacct_ids)} jobs on '{backend_state.name}': {sacct_ids}")
-            try:
+        if state.run_manager:
+            queue = QueueObservation(tuple(
+                (job.job_id, job.state, getattr(job, "reason", None)) for job in jobs
+                if job.job_id
+            ), observed_at)
+            plan = state.run_manager.plan_backend_observation(backend_state.name, queue)
+            outcome = AccountingOutcome.NOT_REQUESTED
+            if plan.accounting_ids:
                 job_stats = await backend_state.backend.get_job_stats(
-                    sacct_ids, user=None,
+                    list(plan.accounting_ids), user=None,
                 )
-                logger.info(f"Got stats for {len(job_stats)}/{len(sacct_ids)} jobs on '{backend_state.name}'")
-            except Exception as e:
-                logger.warning(f"Stats fetch failed for '{backend_state.name}': {e}")
-                raise
-
-        # Write stats back to RunItems and correct false completions
-        if state.run_manager and job_stats:
-            for run in state.run_manager.runs.values():
-                if run.backend_name != backend_state.name:
-                    continue
-                run_updated = False
-                # Set when a symmetric correction unwinds DEP_FAILED items
-                # to PENDING — the run needs another process_run pass for
-                # those newly-eligible items to actually get submitted.
-                needs_reprocess = False
-                for item in run.items:
-                    if item.submission_unresolved:
-                        continue
-                    if item.job_id and item.job_id in job_stats:
-                        s = job_stats[item.job_id]
-                        item.cpu_efficiency = s.cpu_efficiency
-                        item.max_rss = s.max_rss
-                        if s.start_time:
-                            item.started_at = s.start_time
-                        if s.end_time:
-                            item.finished_at = s.end_time
-                        run_updated = True
-                        # Record confirmed scheduler state (stops re-querying)
-                        # Only lock on terminal states — accounting DB can return
-                        # RUNNING/PENDING when the DB hasn't caught up yet.
-                        if s.state and s.state in backend_state.backend.terminal_states:
-                            item.scheduler_state = s.state
-                        # Populate the numeric exit code on every sacct
-                        # observation — useful to consumers regardless of
-                        # which transition branch we end up in.
-                        if s.exit_code is not None:
-                            item.exit_code = s.exit_code
-                        # Correct false completions: accounting says failed but
-                        # item was marked COMPLETED because it vanished from queue
-                        if (
-                            s.state
-                            and s.state in backend_state.backend.failure_states
-                            and item.status == RunItemStatus.COMPLETED
-                        ):
-                            reason = backend_state.backend.failure_states[s.state]
-                            item.status = RunItemStatus.FAILED
-                            item.error = f"Scheduler: {reason}"
-                            logger.info(
-                                f"Corrected task '{item.task.id}' "
-                                f"(job {item.job_id}): {reason}"
-                            )
-                        # SETTLING resolution (v0.10.0): the scheduler said
-                        # the job left the queue but the verdict was unknown
-                        # until accounting returned a row. This is where the
-                        # state machine commits — COMPLETED or FAILED, with
-                        # the exit code as evidence. Same shape as the
-                        # SUBMITTED-past-grace branch below.
-                        elif item.status == RunItemStatus.SETTLING and s.state:
-                            if s.state == "COMPLETED":
-                                item.started_at = item.started_at or item.submitted_at
-                                item.status = RunItemStatus.COMPLETED
-                                item.finished_at = s.end_time or datetime.now(UTC)
-                                logger.info(
-                                    f"Task '{item.task.id}' (job {item.job_id}) "
-                                    f"resolved via sacct: COMPLETED "
-                                    f"(exit {s.exit_code})"
-                                )
-                                if state.run_manager:
-                                    await state.run_manager._after_item_completed(
-                                        run, item,
-                                    )
-                                needs_reprocess = True
-                            elif s.state in backend_state.backend.failure_states:
-                                reason = backend_state.backend.failure_states[s.state]
-                                item.started_at = item.started_at or item.submitted_at
-                                item.status = RunItemStatus.FAILED
-                                item.error = f"Scheduler: {reason}"
-                                item.finished_at = s.end_time or datetime.now(UTC)
-                                logger.info(
-                                    f"Task '{item.task.id}' (job {item.job_id}) "
-                                    f"resolved via sacct: {reason} "
-                                    f"(exit {s.exit_code})"
-                                )
-                                needs_reprocess = True
-                        # SUBMITTED-past-grace resolution: the item was
-                        # missing from squeue and we asked sacct what
-                        # actually happened. Move directly to the right
-                        # terminal state — no FAILED-then-correct dance.
-                        elif item.status == RunItemStatus.SUBMITTED and s.state:
-                            if s.state == "COMPLETED":
-                                item.started_at = item.started_at or item.submitted_at
-                                item.status = RunItemStatus.COMPLETED
-                                item.finished_at = s.end_time or datetime.now(UTC)
-                                logger.info(
-                                    f"Task '{item.task.id}' (job {item.job_id}) "
-                                    f"resolved via sacct: COMPLETED"
-                                )
-                                if state.run_manager:
-                                    await state.run_manager._after_item_completed(
-                                        run, item,
-                                    )
-                                needs_reprocess = True
-                            elif s.state in backend_state.backend.failure_states:
-                                reason = backend_state.backend.failure_states[s.state]
-                                item.started_at = item.started_at or item.submitted_at
-                                item.status = RunItemStatus.FAILED
-                                item.error = f"Scheduler: {reason}"
-                                item.finished_at = s.end_time or datetime.now(UTC)
-                                logger.info(
-                                    f"Task '{item.task.id}' (job {item.job_id}) "
-                                    f"resolved via sacct: {reason}"
-                                )
-                                needs_reprocess = True
-                        # Legacy symmetric correction kept as a backstop
-                        # for runs persisted before the evidence-based
-                        # path existed. New runs never reach this branch
-                        # because they never get FAILED-with-marker.
-                        elif (
-                            s.state == "COMPLETED"
-                            and item.status == RunItemStatus.FAILED
-                            and item.error == DISAPPEARED_BEFORE_RUNNING_MARKER
-                        ):
-                            item.status = RunItemStatus.COMPLETED
-                            item.error = None
-                            logger.info(
-                                f"Corrected legacy FAILED task '{item.task.id}' "
-                                f"(job {item.job_id}): sacct confirms COMPLETED"
-                            )
-                            reset = run.uncascade_dep_failures()
-                            for r in reset:
-                                logger.info(
-                                    f"Unwound DEP_FAILED on '{r.task.id}' "
-                                    f"(parent '{item.task.id}' was corrected)"
-                                )
-                            if reset:
-                                needs_reprocess = True
-                        elif s.state:
-                            logger.debug(
-                                f"sacct state for '{item.task.id}' "
-                                f"(job {item.job_id}): {s.state}"
-                            )
-                if run_updated:
-                    state.run_manager._persist_run(run)
-                    state.run_manager.notify_run(run.id)
-                    if needs_reprocess:
-                        # Newly-eligible items (parents un-failed, their
-                        # children no longer DEP_FAILED) won't get
-                        # submitted until process_run walks the items
-                        # again — without this the run gets stuck.
-                        await state.run_manager.process_run(run)
-
-        # "No record anywhere" timeout: an item still SUBMITTED whose
-        # job_id is in neither squeue nor sacct, well past the long
-        # timeout, was almost certainly dropped by the scheduler —
-        # sbatch returned an id but the scheduler never accepted it.
-        # This block runs unconditionally because, by definition, sacct
-        # returned nothing for these jobs (so they're absent from
-        # job_stats); we only care whether their age has exceeded the
-        # timeout. Mark FAILED with the evidence-based marker so the
-        # user gets an actionable message.
-        if state.run_manager:
-            for run in state.run_manager.runs.values():
-                if run.backend_name != backend_state.name:
-                    continue
-                dropped_any = False
-                for item in run.items:
-                    if (
-                        item.status == RunItemStatus.SUBMITTED
-                        and item.job_id
-                        and item.job_id not in live_job_ids
-                        and item.job_id not in job_stats
-                        and item.submitted_at is not None
-                    ):
-                        age = (now_utc - item.submitted_at).total_seconds()
-                        if age > SUBMITTED_NO_RECORD_TIMEOUT_SECONDS:
-                            item.started_at = item.submitted_at
-                            item.status = RunItemStatus.FAILED
-                            item.error = SCHEDULER_NO_RECORD_MARKER
-                            item.finished_at = now_utc
-                            dropped_any = True
-                            logger.warning(
-                                f"Task '{item.task.id}' (job {item.job_id}): "
-                                f"no record in squeue or sacct after "
-                                f"{age:.0f}s — marking FAILED "
-                                f"(scheduler dropped the job)"
-                            )
-                if dropped_any:
-                    state.run_manager._persist_run(run)
-                    state.run_manager.notify_run(run.id)
-
-        # SETTLING long-grace fallback: an item that's been waiting on
-        # accounting for too long should not block the run forever. If
-        # sacct still has no row well past the timeout, fall back to
-        # COMPLETED with a marker on item.error so consumers know the
-        # exit code wasn't accounting-confirmed. Marking FAILED here
-        # would invent a failure from an accounting-DB-availability
-        # issue, which is worse than reporting "ran but unverified".
-        if state.run_manager:
-            for run in state.run_manager.runs.values():
-                if run.backend_name != backend_state.name:
-                    continue
-                unresolved_any = False
-                for item in run.items:
-                    if (
-                        item.status == RunItemStatus.SETTLING
-                        and item.job_id
-                        and item.job_id not in job_stats
-                        and item.finished_at is not None
-                    ):
-                        age = (now_utc - item.finished_at).total_seconds()
-                        if age > SETTLING_NO_RECORD_TIMEOUT_SECONDS:
-                            item.status = RunItemStatus.COMPLETED
-                            item.error = SETTLING_UNCONFIRMED_MARKER
-                            # finished_at stays as the queue-vanish moment.
-                            unresolved_any = True
-                            logger.warning(
-                                f"Task '{item.task.id}' (job {item.job_id}): "
-                                f"SETTLING for {age:.0f}s without an sacct "
-                                f"row — marking COMPLETED (unconfirmed)"
-                            )
-                            if state.run_manager:
-                                await state.run_manager._after_item_completed(
-                                    run, item,
-                                )
-                if unresolved_any:
-                    state.run_manager._persist_run(run)
-                    state.run_manager.notify_run(run.id)
-                    await state.run_manager.process_run(run)
+                outcome = AccountingOutcome.SUCCEEDED
+            await state.run_manager.apply_backend_observations([
+                BackendObservation(plan, outcome, job_stats),
+            ])
 
         # Handle external jobs (not in any active run)
         if state.run_manager and state.run_storage:
@@ -591,6 +313,14 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             last_poll_duration_ms=duration_ms,
             error=str(e),
         )
+        if state.run_manager:
+            if plan is None:
+                plan = state.run_manager.plan_backend_observation(
+                    backend_state.name, QueueObservation((), observed_at, succeeded=False),
+                )
+            await state.run_manager.apply_backend_observations([
+                BackendObservation(plan, AccountingOutcome.FAILED),
+            ])
 
 
 async def poll_jobs() -> None:
@@ -616,18 +346,6 @@ async def poll_jobs() -> None:
                 "Polled %s jobs from %s backends (my_jobs_only=%s)",
                 total_jobs, len(tasks), state.filter_enabled,
             )
-
-        # Update run statuses based on polled jobs
-        if state.run_manager and state.run_manager.get_active_runs():
-            backend_jobs: dict[str, list[tuple]] = {}
-            for name, bs in state.backends.items():
-                if not bs.poll_fresh:
-                    continue
-                backend_jobs[name] = [
-                    (job.job_id, job.state, getattr(job, "reason", None))
-                    for job in bs.jobs
-                ]
-            await state.run_manager.update_all_runs(backend_jobs)
 
         # Save dirty runs
         if state.run_manager:

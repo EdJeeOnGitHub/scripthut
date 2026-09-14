@@ -105,7 +105,8 @@ async def test_poll_uses_identity_for_quota_and_unfiltered_accounting(monkeypatc
     run = Run(id="r", workflow_name="smoke", backend_name="quest",
               created_at=datetime.now(UTC), max_concurrent=1,
               items=[RunItem(task=task(), job_id="1", status=RunItemStatus.SETTLING)])
-    manager = MagicMock()
+    from scripthut.runs.manager import RunManager
+    manager = RunManager(ScriptHutConfig(), {}, job_backends={"quest": driver})
     manager.runs = {"r": run}
     state = main.AppState()
     state.backends = {"quest": bs}
@@ -163,7 +164,10 @@ async def test_overlapping_job_ids_are_scoped_to_backend(monkeypatch, tmp_path):
     state = main.AppState()
     state.backends = {"quest": bs}
     state.run_storage = storage
-    state.run_manager = MagicMock(runs={run.id: run})
+    from scripthut.runs.manager import RunManager
+    state.run_manager = RunManager(ScriptHutConfig(), {}, storage=storage,
+                                  job_backends={"quest": driver})
+    state.run_manager.runs[run.id] = run
     monkeypatch.setattr(main, "state", state)
     await main.poll_backend(bs, filter_user="bui4696")
     assert bs.poll_fresh
