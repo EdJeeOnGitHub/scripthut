@@ -64,3 +64,12 @@ def test_render_has_bounded_bar_shared_label_and_explicit_unknowns():
     assert '2 unpriced' in html
     assert 'Forecast incomplete' in html
     assert 'Remaining 60.0' in html
+
+
+def test_first_failure_and_partial_cluster_coverage_are_visible(tmp_path):
+    reader = AllocationReader()
+    assert reader.read(str(tmp_path/'missing.json'), now=NOW) == {}
+    assert reader.alerts
+    row=sample(); row['forecast_complete']=False
+    result=view(row,NOW)
+    assert result['partial']

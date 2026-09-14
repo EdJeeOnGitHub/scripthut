@@ -1,3 +1,4 @@
+{% for alert in allocation_alerts | default([]) %}<p class="text-sm text-amber-700 mb-2">{{ alert }}</p>{% endfor %}
 {% from '_allocation.html' import allocation_bar %}
 {% from '_status.html' import status_dot, status_bar %}
 {#

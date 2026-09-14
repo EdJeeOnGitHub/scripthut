@@ -15,7 +15,7 @@
   <div class="flex flex-wrap gap-x-3 gap-y-1 text-gray-700">
     <span>Used {{ '{:,.1f}'.format(a.used) }} {{ a.unit }}</span>
     {% for label, f in [('Running', a.running), ('Queued', a.queued)] %}
-    <span>{{ label }} {% if f.estimate is not none %}≈{{ '{:,.1f}'.format(f.estimate) }}{% else %}unknown{% endif %} ({{ f.jobs }} jobs){% if f.unpriced_jobs %}; {{ f.unpriced_jobs }} unpriced{% endif %}</span>
+    <span>{{ label }} {% if f.estimate is not none %}≈{{ '{:,.1f}'.format(f.estimate) }}{% else %}unknown{% endif %} ({% if a.forecast_complete is defined and not a.forecast_complete %}job count incomplete{% else %}{{ f.jobs }} jobs{% endif %}){% if f.unpriced_jobs %}; {{ f.unpriced_jobs }} unpriced{% endif %}</span>
     {% endfor %}
     <span>Remaining {% if a.remaining is not none %}{{ '{:,.1f}'.format(a.remaining) }}{% else %}unknown{% endif %}</span>
   </div>

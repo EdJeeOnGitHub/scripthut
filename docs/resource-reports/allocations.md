@@ -24,3 +24,8 @@ An allocation shared by multiple backends is one record with multiple links, not
 multiple balances. Card labels make shared identity explicit. Site tools, billing
 rules, reporting windows and deployment are owned by agent-infra's
 `allocation-reports` package; there are no hostnames or site commands in this UI.
+
+A bundle may contain an `errors` mapping of allocation IDs to collector errors.
+These show an unavailable notice even before a first successful observation.
+`forecast_complete: false` marks missing cluster job observations: displayed
+counts are incomplete and no missing cluster is assumed idle.

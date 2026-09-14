@@ -1192,6 +1192,7 @@ def _overview_context(request: Request) -> dict[str, Any]:
         "backends": state.backends,
         "backend_usage": _backend_usage(),
         "allocation_reports": allocation_reader.by_backend(),
+        "allocation_alerts": allocation_reader.alerts,
     }
 
 
@@ -1249,6 +1250,7 @@ async def backends_page(request: Request) -> HTMLResponse:
             "backends": state.backends,
             "backend_usage": _backend_usage(),
         "allocation_reports": allocation_reader.by_backend(),
+        "allocation_alerts": allocation_reader.alerts,
             "status": ConnectionStatus(
                 connected=state.any_connected,
                 host=", ".join(c.status.host for c in state.backends.values() if c.status.connected),

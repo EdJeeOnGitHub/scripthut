@@ -63,7 +63,7 @@ def view(record, now=None):
         balance = allowance - record['used']
     record['remaining'] = balance
     estimate = sum(record[k]['estimate'] or 0 for k in ('running', 'queued'))
-    record['partial'] = any(record[k]['unpriced_jobs'] or record[k]['estimate'] is None for k in ('running', 'queued'))
+    record['partial'] = not record.get('forecast_complete', True) or any(record[k]['unpriced_jobs'] or record[k]['estimate'] is None for k in ('running', 'queued'))
     record['headroom'] = balance - estimate if balance is not None else None
     record['excess'] = max(0, record['used'] + estimate - allowance) if allowance is not None else 0
     widths = []
@@ -79,6 +79,7 @@ def view(record, now=None):
 class AllocationReader:
     """Keep valid prior records if an atomic snapshot is temporarily unreadable."""
     def __init__(self):
+        self.alerts = []
         self._path = None
         self._records = {}
 
@@ -86,6 +87,7 @@ class AllocationReader:
         path = path or os.environ.get('SCRIPTHUT_ALLOCATION_REPORT_FILE')
         if path != self._path:
             self._records = {}
+            self.alerts = []
             self._path = path
         if not path:
             return {}
@@ -97,6 +99,7 @@ class AllocationReader:
             bundle = json.loads(data)
             if bundle.get('schema_version') != 1 or not isinstance(bundle.get('allocations'), list):
                 raise ValueError('Unsupported allocation snapshot')
+            self.alerts = ['Allocation report unavailable: ' + str(key) for key in bundle.get('errors', {})]
             records = {}
             for row in bundle['allocations']:
                 try:
@@ -106,12 +109,14 @@ class AllocationReader:
                     records[row['id']] = row
                 except (ValueError, KeyError, TypeError) as exc:
                     log.warning('Skipping invalid allocation: %s', exc)
+                    self.alerts.append('An allocation report is invalid; no zero balance was inferred.')
                     key = row.get('id') if isinstance(row, dict) else None
                     if key in self._records:
                         records[key] = dict(self._records[key], error='Invalid latest allocation snapshot')
             self._records = records
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.warning('Allocation snapshot unavailable: %s', exc)
+            self.alerts = ['Allocation reports temporarily unavailable.']
             self._records = {key: dict(row, error='Allocation snapshot unavailable') for key, row in self._records.items()}
         return {key: view(row, now) for key, row in self._records.items()}
 
