@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from scripthut.reports.resources import ResourceUsage
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,7 @@ class JobStats:
     # means accounting either didn't return a row or didn't surface a
     # parseable value — distinct from "exit was 0", which is an int.
     exit_code: int | None = None
+    resource_usage: ResourceUsage | None = None
 
 
 @dataclass

@@ -186,7 +186,7 @@ class TestOverviewRoutes:
         assert 'sse-connect="/overview/stream"' in resp.text
         # The card is labelled with its source, and the heading shows the
         # workflow with the redundant "demo/" prefix stripped.
-        assert "Source: demo" in resp.text
+        assert "Project: demo" in resp.text
         assert ">\n                train\n" in resp.text
 
     def test_active_and_finished_runs_get_their_own_sections(self, client):

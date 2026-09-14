@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Resource efficiency · ScriptHut</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-100 min-h-screen"><main class="container mx-auto px-4 py-8">
+{% include 'nav.html' %}
+<h1 class="text-xl font-semibold my-5">Resource efficiency</h1>
+<p class="text-sm text-gray-600 mb-3">Tracked jobs only. CPU totals cover jobs with paired measurements, including failed jobs; memory sizing distributions use successful jobs with comparable measurements. Missing measurements are not zero. Dates filter completion time in UTC.</p>
+{% if error %}<p class="text-red-700">{{ error }}</p>{% endif %}
+<form class="flex flex-wrap gap-3 p-4 bg-white rounded shadow mb-5" method="get">
+{% for key, label, kind in [('start','From','date'), ('end','Through','date'), ('backend','Backend','text'), ('project','Project','text'), ('workflow','Workflow','text')] %}
+<label class="text-sm">{{ label }} <input class="border rounded p-1" type="{{ kind }}" name="{{ key }}" value="{{ filters[key] }}"></label>
+{% endfor %}
+<label class="text-sm">Sort <select class="border rounded p-1" name="sort">{% for key,label in [('allocated_hours','Allocated CPU-hours'),('cpu_efficiency','Lowest CPU efficiency'),('memory_median_percent','Lowest memory utilization')] %}<option value="{{ key }}" {% if filters.sort == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+<button class="bg-blue-600 text-white rounded px-3">Apply</button></form>
+{% macro summary(s) %}
+<div class="flex flex-wrap gap-5 text-sm">
+<span>{{ s.jobs }} jobs · {{ s.failed }} failed · {{ s.oom }} OOM · {{ s.timeouts }} timeouts</span>
+<span>CPU coverage {{ s.cpu_measured }}/{{ s.jobs }} · RAM coverage {{ s.memory_measured }}/{{ s.jobs }}</span>
+<span>Allocated {{ '%.2f'|format(s.allocated_hours) }} CPU-h · consumed {{ '%.2f'|format(s.consumed_hours) }} CPU-h · efficiency {{ '%.1f%%'|format(s.cpu_efficiency) if s.cpu_efficiency is not none else 'unavailable' }}</span>
+</div>
+{% endmacro %}
+<section class="bg-white rounded shadow p-4 mb-4"><h2 class="font-semibold mb-2">Overall</h2>{{ summary(report.overall) }}</section>
+{% macro groups_table(groups, workflow=false) %}
+<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-left text-gray-500"><tr><th>Project{% if workflow %} / workflow / backend{% endif %}</th><th>Jobs / CPU coverage / RAM coverage</th><th>Allocated CPU-h</th><th>CPU efficiency</th><th>RAM peak mean / median / p95 / max (GiB)</th><th>Median RAM/request</th><th>OOM / timeout</th></tr></thead><tbody>
+{% for g in groups %}<tr class="border-t"><td class="py-2"><a class="text-blue-600" href="?{{ {'start':filters.start,'end':filters.end,'project':g.project,'workflow':g.workflow if workflow else '', 'backend':g.backend if workflow else ''}|urlencode }}">{{ g.project }}{% if workflow %} / {{ g.workflow }} / {{ g.backend }}{% endif %}</a></td><td>{{ g.jobs }} / {{ g.cpu_measured }} / {{ g.memory_measured }}</td><td>{{ '%.2f'|format(g.allocated_hours) }}</td><td>{{ '%.1f%%'|format(g.cpu_efficiency) if g.cpu_efficiency is not none else '—' }}</td><td>{% for v in [g.peak_mean,g.peak_median,g.peak_p95,g.peak_max] %}{{ '%.2f'|format(v/1073741824) if v is not none else '—' }}{% if not loop.last %} / {% endif %}{% endfor %}</td><td>{{ '%.1f%%'|format(g.memory_median_percent) if g.memory_median_percent is not none else '—' }}</td><td>{{ g.oom }} / {{ g.timeouts }}</td></tr>{% else %}<tr><td colspan="7" class="py-4 text-gray-500">No completed tracked jobs in this period.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endmacro %}
+<section class="bg-white rounded shadow p-4 mb-4"><h2 class="font-semibold mb-2">By project</h2>{{ groups_table(report.projects) }}</section>
+<section class="bg-white rounded shadow p-4 mb-4"><h2 class="font-semibold mb-2">By workflow and backend</h2>{{ groups_table(report.groups, true) }}</section>
+<section class="bg-white rounded shadow p-4"><h2 class="font-semibold mb-2">Jobs · {{ report.jobs|length }} matching (showing newest 200)</h2>
+{% from '_efficiency.html' import job_efficiency %}
+<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-left text-gray-500"><tr><th>Job / project</th><th>Finished / state</th><th>Request</th><th>Measurements</th></tr></thead><tbody>
+{% for job in report.jobs[:200] %}<tr class="border-t"><td class="py-3">{{ job.backend }} / {{ job.job_id }}<br>{{ job.project }} / {{ job.workflow }}<br>{% if job.run_id in live_run_ids %}<a class="text-blue-600" href="{{ request.scope.get('root_path', '') }}/runs/{{ job.run_id }}">Run {{ job.run_id }}</a>{% else %}Archived metrics{% endif %}</td><td>{{ job.finished }}<br>{{ job.status }}{% if job.scheduler_state %} · {{ job.scheduler_state }}{% endif %}</td><td>{{ job.requested_cpus }} CPUs / {{ job.requested_memory }}</td><td>{{ job_efficiency(resources(job.usage)) }}{% if job.usage.consumed_cpu_seconds is none and job.historical_cpu_efficiency is not none %}<div>Historical CPU efficiency: {{ '%.1f'|format(job.historical_cpu_efficiency) }}% (excluded from weighted totals; denominator unavailable)</div>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
+<p class="text-xs text-gray-500 mt-3">Peak statistics are across jobs, not time-averaged RAM. Multi-task peaks may not represent simultaneous whole-job memory. Review OOMs and workload variation before reducing requests. This report does not change resource requests.</p>
+</main></body></html>
