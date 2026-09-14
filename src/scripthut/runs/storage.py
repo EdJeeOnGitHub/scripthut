@@ -12,6 +12,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+from scripthut.reports.efficiency import EfficiencyStore
+
 from scripthut.runs.models import (
     Run,
     RunItem,
@@ -54,6 +56,10 @@ class RunStorageManager:
         self._dirty_runs: set[str] = set()
         # Cache for loaded weekly runs (backend_name -> {week_id -> Run})
         self._weekly_cache: dict[str, dict[str, Run]] = {}
+
+    @cached_property
+    def efficiency_store(self) -> EfficiencyStore:
+        return EfficiencyStore(self.base_dir / "resource-metrics.sqlite3")
 
     @cached_property
     def request_journal(self) -> RequestJournal | None:
@@ -147,6 +153,7 @@ class RunStorageManager:
                     f.flush()
                     os.fsync(f.fileno())
             os.replace(temp_path, run_path)
+            self.efficiency_store.safe_record([run])
             if sync and os.name == "posix":
                 # Also persist newly created ancestor directory entries. This
                 # matters when the attempt is the first write for a new run.

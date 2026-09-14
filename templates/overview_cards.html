@@ -107,7 +107,7 @@
 </div>
 
 {#
-  Today's shape, beside the year. Stacked by source so a spike is
+  Today's shape, beside the year. Stacked by project so a spike is
   attributable; colours are slots 1-5 of the validated categorical palette
   plus a neutral for the "Other" rollup, assigned busiest-source-first so a
   source keeps its colour as the mix changes. Three of those hues sit under
@@ -120,7 +120,7 @@
             Last {{ hourly.window_hours }} hours
         </h2>
         <span class="text-xs text-gray-400" title="Hours are the server's local time">
-            CPU-hours by source · local time
+            CPU-hours by project · local time
         </span>
     </div>
 
@@ -141,7 +141,7 @@
         <!-- Bars. Each column is one local hour; segments stack from the
              baseline with a 2px surface gap, rounded only at the free end. -->
         <div class="flex items-end gap-[2px] h-32" role="img"
-            aria-label="CPU-hours per hour over the last {{ hourly.window_hours }} hours, by source">
+            aria-label="CPU-hours per hour over the last {{ hourly.window_hours }} hours, by project">
             {% for hour in hourly.hours %}
             <div class="flex-1 h-full flex flex-col-reverse gap-[2px] justify-start min-w-0"
                 title="{{ hour.label }} — {% if hour.segments %}{{ '%.1f'|format(hour.total_cpu_hours) }} CPU-h{% for seg in hour.segments %} · {{ seg.source }} {{ '%.1f'|format(seg.cpu_hours) }}{% endfor %}{% else %}idle{% endif %}">
@@ -197,16 +197,17 @@
             {% else %}border-gray-300{% endif %}
             {% if not is_active %}opacity-75 hover:opacity-100{% endif %}">
 
-            <!-- Source chip + status -->
+            <!-- Project chip + status -->
+            {% set project = project_name(run) %}
             <div class="flex items-center justify-between gap-2 mb-1">
-                {% if run.source_name %}
+                {% if project %}
                 <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium truncate"
-                    title="Source: {{ run.source_name }}">
+                    title="Project: {{ project }}">
                     <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path></svg>
-                    {{ run.source_name }}
+                    {{ project }}
                 </span>
                 {% else %}
-                <span class="text-xs text-gray-400 italic">no source</span>
+                <span class="text-xs text-gray-400 italic">Unattributed</span>
                 {% endif %}
                 <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0
                     {% if run.status.value == 'running' %}bg-indigo-100 text-indigo-700
