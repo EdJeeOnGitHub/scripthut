@@ -1,46 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ScriptHut — Artifacts</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-100 min-h-screen text-gray-900">
-<main class="container mx-auto px-4 py-8">
-  <header class="mb-8">{% include "nav.html" %}</header>
-  <h1 class="text-2xl font-semibold mb-4">Artifacts</h1>
-  {% if error %}
-    <p role="alert" class="rounded border border-amber-300 bg-amber-50 p-4">{{ error }}</p>
-  {% elif artifact %}
-    <a class="text-blue-700 underline" href="{{ request.url_for('artifact_list') }}">All artifacts</a>
-    <p class="font-mono text-sm break-all my-4">{{ artifact.id }}</p>
-    {% for entry in artifact.entries %}
-      <p class="mb-2"><strong>{{ entry.project }} / {{ entry.name }}</strong> · {{ entry.kind }}</p>
-    {% endfor %}
-    <h2 class="text-lg font-semibold mt-6 mb-2">Files</h2>
-    <div class="overflow-x-auto rounded border bg-white">
-    <table class="w-full text-left">
-      <thead><tr class="border-b"><th class="p-3">File</th><th class="p-3">Bytes</th></tr></thead>
-      <tbody>{% for file in files %}
-        <tr class="border-b"><td class="p-3"><a class="text-blue-700 underline" href="{{ file.url }}" target="_blank" rel="noopener">{{ file.path }}</a></td><td class="p-3 tabular-nums">{{ file.size }}</td></tr>
-      {% else %}<tr><td class="p-3" colspan="2">This artifact has no files.</td></tr>{% endfor %}</tbody>
-    </table></div>
-    <h2 class="text-lg font-semibold mt-6 mb-2">Related runs</h2>
-    <ul>{% for reference in artifact.runs %}
-      <li class="mb-2">{{ reference.role|capitalize }} · {{ reference.name }} ·
-      {% if reference.run_id %}<a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/runs/{{ reference.run_id }}">{{ reference.run_id }}</a>
-      {% else %}<a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/research-runs/{{ reference.request_id }}">Request {{ reference.request_id }}</a>{% endif %}</li>
-    {% else %}<li>No runs reference this artifact yet.</li>{% endfor %}</ul>
-  {% else %}
-    <div class="overflow-x-auto rounded border bg-white">
-    <table class="w-full text-left">
-      <thead><tr class="border-b"><th class="p-3">Project / name</th><th class="p-3">Kind</th><th class="p-3">Version</th></tr></thead>
-      <tbody>{% for entry in artifacts %}
-        <tr class="border-b"><td class="p-3"><a class="text-blue-700 underline" href="{{ request.url_for('artifact_detail', version=entry.version) }}">{{ entry.project }} / {{ entry.name }}</a></td><td class="p-3">{{ entry.kind }}</td><td class="p-3 font-mono text-sm">{{ entry.version[:19] }}…</td></tr>
-      {% else %}<tr><td class="p-3" colspan="3">No artifacts have been published yet.</td></tr>{% endfor %}</tbody>
-    </table></div>
-  {% endif %}
-</main>
-</body>
-</html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScriptHut — Artifact</title><script src="https://cdn.tailwindcss.com"></script>{% include '_artifact_style.html' %}</head>
+<body class="bg-slate-50 text-slate-900"><main class="artifact-shell"><header class="mb-10">{% include 'nav.html' %}</header>
+<a class="artifact-link text-sm" href="{{ request.url_for('artifact_list') }}">← Projects</a>
+{% if error %}<p role="alert" class="artifact-panel border-amber-200 bg-amber-50 p-6 mt-6">{{ error }}</p>{% elif artifact %}
+<div class="my-7"><p class="artifact-kicker mb-2">Published artifact</p>{% for entry in entries %}<h1 class="text-2xl font-semibold break-words">{{ entry.display_name|default(entry.name) }}</h1><a class="artifact-link text-sm" href="{{ request.url_for('artifact_project',project=entry.project) }}">{{ entry.project }}</a> <span class="artifact-tag ml-2">{{ entry.kind }}</span>{% endfor %}</div>
+{% if selected_pdf %}<section class="artifact-panel overflow-hidden mb-7" aria-label="Report preview"><div class="p-4 border-b border-slate-200 flex flex-wrap justify-between items-center gap-3"><h2 class="font-medium break-all">{{ selected_pdf.path }}</h2><div class="flex gap-2"><a class="artifact-button" href="{{ selected_pdf.url }}" target="_blank" rel="noopener">Open PDF ↗</a><a class="artifact-button artifact-primary" href="{{ selected_pdf.url }}" download>Download</a></div></div>
+{% if pdfs|length > 1 %}<form method="get" class="p-4 flex flex-wrap gap-3 items-center">{% if request.query_params.get('project') %}<input type="hidden" name="project" value="{{ request.query_params.get('project') }}">{% endif %}<label for="report-file" class="text-sm">Preview file</label><select id="report-file" name="pdf" class="border rounded p-2 max-w-full">{% for file in pdfs %}<option value="{{ file.path }}" {% if file.path == selected_pdf.path %}selected{% endif %}>{{ file.path }}</option>{% endfor %}</select><button class="artifact-button">View</button></form>{% endif %}
+<iframe class="artifact-preview w-full bg-slate-100" style="height:760px;border:0" src="{{ selected_pdf.url }}" title="PDF preview: {{ selected_pdf.path }}" loading="lazy"></iframe><p class="p-3 text-xs text-slate-500">If your browser cannot display the preview, use Open PDF or Download.</p></section>{% endif %}
+<div class="grid lg:grid-cols-3 gap-6"><section class="artifact-panel p-5 lg:col-span-2"><h2 class="font-semibold mb-4">Files <span class="text-slate-400 font-normal">{{ files|length }}</span></h2><div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead class="text-slate-500"><tr><th class="pb-3 font-medium">Name</th><th class="pb-3 font-medium text-right">Size</th><th><span class="sr-only">Download</span></th></tr></thead><tbody class="divide-y divide-slate-100">{% for file in files %}<tr><td class="py-3 pr-4"><a class="artifact-link break-all" href="{{ file.url }}" target="_blank" rel="noopener">{{ file.path }}</a></td><td class="py-3 text-right whitespace-nowrap text-slate-500">{{ file.size|artifact_bytes }}</td><td class="pl-4"><a class="artifact-link" href="{{ file.url }}" download aria-label="Download {{ file.path }}">↓</a></td></tr>{% else %}<tr><td class="py-5" colspan="3">This artifact has no files.</td></tr>{% endfor %}</tbody></table></div></section>
+<aside class="artifact-panel p-5"><h2 class="font-semibold mb-4">Provenance</h2><ul class="space-y-4 text-sm">{% for reference in artifact.runs %}<li><span class="artifact-tag">{{ reference.role }}</span><p class="my-2 break-words">{{ reference.name }}</p>{% if reference.run_id %}<a class="artifact-link" href="{{ request.scope.get('root_path','') }}/runs/{{ reference.run_id }}">View run ↗</a>{% else %}<a class="artifact-link" href="{{ request.scope.get('root_path','') }}/research-runs/{{ reference.request_id }}">View request ↗</a>{% endif %}</li>{% else %}<li class="text-slate-500">No linked runs. This artifact may have been imported directly.</li>{% endfor %}</ul><details class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-500"><summary class="cursor-pointer">Technical details</summary><p class="font-mono break-all mt-3">{{ artifact.id }}</p></details></aside></div>
+{% endif %}</main></body></html>
