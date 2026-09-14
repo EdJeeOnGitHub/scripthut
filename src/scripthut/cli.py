@@ -405,7 +405,7 @@ class LocalClient:
 
     async def run_source_workflow(
         self, source: str, workflow: str, *, backend: str | None = None,
-        branch: str | None = None,
+        branch: str | None = None, commit: str | None = None,
     ) -> dict[str, Any]:
         """Local-mode source-workflow submission is not supported.
 
@@ -645,11 +645,16 @@ class RemoteClient:
 
     async def run_source_workflow(
         self, source: str, workflow: str, *, backend: str | None = None,
-        branch: str | None = None,
+        branch: str | None = None, commit: str | None = None,
     ) -> dict[str, Any]:
+        if commit is not None:
+            from scripthut.sources.git import is_commit_sha
+            if branch is not None or not is_commit_sha(commit):
+                raise RuntimeError("Choose a branch or a full lowercase 40-character commit SHA")
+        endpoint = "run-commit" if commit is not None else "run"
         return await self._post(
-            f"/sources/{source}/run", workflow=workflow, backend=backend,
-            branch=branch,
+            f"/sources/{source}/{endpoint}", workflow=workflow, backend=backend,
+            branch=branch, commit=commit,
         )
 
     async def view_run(self, run_id: str) -> dict[str, Any]:
@@ -3626,6 +3631,7 @@ async def _cmd_workflow_run(args: argparse.Namespace) -> int:
         summary = await client.run_source_workflow(
             args.source, args.name, backend=args.backend,
             branch=getattr(args, "branch", None),
+            **({"commit": args.commit} if getattr(args, "commit", None) is not None else {}),
         )
         # base_url covers the daemon path too, where _resolve_server is None
         # but a server is in fact processing the run.
@@ -3960,7 +3966,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         help="Override the source's default backend",
     )
-    p_wf_run.add_argument(
+    revision = p_wf_run.add_mutually_exclusive_group()
+    revision.add_argument("--commit", help="Exact full 40-character commit SHA (git sources only)")
+    revision.add_argument(
         "--branch",
         help=(
             "Run from this git branch instead of the source's configured "

@@ -69,6 +69,7 @@ class BackendState:
     )
     poll_fresh: bool = False
     enabled: bool = True
+    browser_login: bool = False
     command_log: CommandLog = field(default_factory=CommandLog)
     clone_dir: str = "~/scripthut-repos"
     _reconnect_after: float = 0.0
@@ -368,6 +369,8 @@ async def init_runtime(
         config, ssh_clients, storage=run_storage, job_backends=job_backends,
         backend_users={name: bs.current_user for name, bs in backends.items()},
     )
+    for name, bs in backends.items():
+        bs.browser_login = config.browser_login.enabled and name in config.browser_login.profiles
     def available(name: str) -> bool:
         bs = backends.get(name)
         return bool(bs and bs.enabled and bs.status.connected

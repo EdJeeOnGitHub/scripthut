@@ -1,5 +1,19 @@
 {% from '_status.html' import status_dot, status_bar %}
 {% if run %}
+{% if run.artifact_refs %}
+<section class="rounded border bg-white p-4 mb-4" aria-label="Research artifacts">
+    <h2 class="font-semibold mb-2">Research artifacts</h2>
+    <p class="text-sm mb-2"><a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/research-runs/{{ run.artifact_refs.request_id }}">Preparation and collection</a></p>
+    {% for role in ['inputs', 'outputs'] %}
+    <p class="text-sm"><strong>{{ role|capitalize }}:</strong>
+        {% for reference in run.artifact_refs[role] %}
+        <a class="text-blue-700 underline mr-3" href="{{ request.scope.get('root_path', '') }}/artifacts/{{ reference.version }}">{{ reference.name }} · {{ reference.version[7:19] }}</a>
+        {% if reference.execution_status %}<span class="text-amber-800">Partial output ({{ reference.execution_status }})</span>{% endif %}
+        {% else %}{{ 'Awaiting collection' if role == 'outputs' else 'None' }}{% endfor %}
+    </p>
+    {% endfor %}
+</section>
+{% endif %}
 <div class="grid grid-cols-2 md:grid-cols-5 {% if cost_summary is defined and cost_summary and cost_summary.costed_tasks > 0 %}lg:grid-cols-6{% endif %} gap-4">
     <div>
         <p class="text-sm text-gray-500">Status</p>
@@ -82,7 +96,7 @@
 <div class="mt-4 flex gap-2">
     {% if run.status.value in ['pending', 'running'] %}
     <button
-        hx-post="/runs/{{ run.id }}/cancel"
+        hx-post="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}/cancel"
         hx-swap="none"
         hx-confirm="Cancel all pending and running tasks?"
         hx-on::after-request="if(event.detail.successful) window.location.reload()"

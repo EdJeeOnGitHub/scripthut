@@ -110,6 +110,7 @@ class SSHClient:
         command: str | None = None,
         term_type: str = "xterm-256color",
         term_size: tuple[int, int] = (80, 24),
+        *, no_echo: bool = False,
     ) -> asyncssh.SSHClientProcess:
         """Create an interactive SSH process with a PTY.
 
@@ -131,6 +132,7 @@ class SSHClient:
             command,
             term_type=term_type,
             term_size=term_size,
+            term_modes={asyncssh.PTY_ECHO: 0} if no_echo else {},
             encoding=None,
         )
         return process

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScriptHut — Research request</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-100 min-h-screen text-gray-900">
+<main class="container mx-auto px-4 py-8">
+  <header class="mb-8">{% include 'nav.html' %}</header>
+  <h1 class="text-2xl font-semibold mb-4">Research request</h1>
+  <p class="font-mono text-sm mb-4">{{ request_id }}</p>
+  {% if error %}<p role="alert" class="border border-amber-300 bg-amber-50 p-4">{{ error }}</p>
+  {% else %}
+  <section class="rounded border bg-white p-4">
+    <p><strong>Preparation:</strong> {{ record.status|replace('_', ' ') }}</p>
+    {% if record.project %}<p><strong>Project:</strong> {{ record.project }} · {{ record.experiment }} · {{ record.backend }}</p>{% endif %}
+    {% if record.source_commit %}<p class="break-all"><strong>Commit:</strong> {{ record.source_commit }}</p>{% endif %}
+    {% if record.error %}<p role="alert" class="text-red-800 mt-2">{{ record.error }}</p>{% endif %}
+    {% if record.run_id %}<p class="mt-2"><a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/runs/{{ record.run_id }}">Open run</a>{% if record.execution %} · {{ record.execution.status }}{% endif %}</p>{% endif %}
+    {% if record.lifecycle %}
+      <p class="mt-2"><strong>Output collection:</strong> {{ record.lifecycle.collection_status|default('Not requested')|replace('_', ' ') }}</p>
+      {% if record.lifecycle.collection_error %}<p role="alert" class="text-red-800">{{ record.lifecycle.collection_error }}</p>{% endif %}
+    {% endif %}
+  </section>
+  {% for role, versions in [('Inputs', record.artifacts|default({})), ('Outputs', record.lifecycle.output_artifacts if record.lifecycle and record.lifecycle.output_artifacts else {})] %}
+    {% if versions %}<h2 class="text-lg font-semibold mt-6 mb-2">{{ role }}</h2><ul>
+      {% for name, version in versions.items() %}<li><a class="text-blue-700 underline" href="{{ request.scope.get('root_path', '') }}/artifacts/{{ version }}">{{ name }}</a> · <span class="font-mono text-sm">{{ version[7:19] }}</span></li>{% endfor %}
+    </ul>{% endif %}
+  {% endfor %}
+  <p class="mt-6"><a class="text-blue-700 underline" href="{{ request.url_for('research_preparation', request_id=request_id) }}">Refresh status</a></p>
+  {% endif %}
+</main></body></html>

@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from scripthut import __version__
 from scripthut.backends.base import JobStats
+from scripthut.browser_login import LoginManager, make_login_router
 from scripthut.config import find_config_file, load_config, load_yaml_config, set_config
 from scripthut.config_schema import (
     GitSourceConfig,
@@ -82,6 +83,7 @@ class AppState:
     run_storage: RunStorageManager | None = None
     usage_log: UsageLog | None = None
     terminal_manager: TerminalManager = field(default_factory=TerminalManager)
+    login_manager: LoginManager | None = None
     disk_service: DiskScanService = field(default_factory=DiskScanService)
     pricing_service: Any = None  # Optional PricingService instance
     debug_job_ids: set[str] = field(default_factory=set)  # job IDs submitted via interactive debug
@@ -687,6 +689,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     set_config(config)
     state.config = config
 
+    if config.browser_login.enabled:
+        state.login_manager = LoginManager(state)
+
     logger.info(f"Loaded configuration with {len(config.backends)} backends, {len(config.sources)} sources")
 
     # Initialize filter settings
@@ -712,6 +717,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     logger.info("Shutting down...")
     state._shutdown_event.set()
+    if state.login_manager:
+        await state.login_manager.close()
+        state.login_manager = None
 
     # If init is still in flight, stop it before tearing anything down.
     if state._startup_task and not state._startup_task.done():
@@ -949,6 +957,13 @@ def reload_runtime_config(new_config: ScriptHutConfig) -> ReloadReport:
 
     old = state.config
 
+    if old.browser_login != new_config.browser_login:
+        report.requires_restart.append("browser login")
+        report.messages.append("Browser login configuration changed (restart required)")
+        # Keep the validated runtime boundary and existing session ownership
+        # intact until restart; don't mix new profiles with existing transports.
+        new_config = new_config.model_copy(update={"browser_login": old.browser_login})
+
     added_b, removed_b, modified_b = _diff_named(old.backends, new_config.backends)
     if added_b or removed_b or modified_b:
         report.requires_restart.append("backends")
@@ -1004,6 +1019,7 @@ def reload_runtime_config(new_config: ScriptHutConfig) -> ReloadReport:
 
 # Create FastAPI app
 app = FastAPI(
+    root_path=os.environ.get('SCRIPTHUT_ROOT_PATH', ''),
     title="ScriptHut",
     description="Remote job management for Slurm, ECS, and AWS Batch",
     version=__version__,
@@ -1013,12 +1029,22 @@ app = FastAPI(
 # Versioned JSON API for CLI and external clients
 from scripthut.api import make_api_router  # noqa: E402
 
+from scripthut.research_api import make_research_router
+from scripthut.artifact_api import make_artifact_router
+
+app.include_router(make_research_router())
+app.include_router(make_artifact_router())
 app.include_router(make_api_router(state))
+app.include_router(make_login_router(state))
 
 # Templates
 templates_path = Path(__file__).parent.parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_path))
 templates.env.globals["scripthut_version"] = __version__
+
+from scripthut.artifact_views import make_artifact_views
+
+app.include_router(make_artifact_views(templates))
 
 
 _STARTING_PAGE = """\

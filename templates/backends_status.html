@@ -58,6 +58,9 @@
     </div>
     {% if backend.socket_connection %}
     {% set connection = backend.socket_connection %}
+    {% if backend.browser_login %}
+    <a class="ml-4 text-sm underline" href="/login/backend/{{ name | urlencode }}">Connect in browser</a>
+    {% endif %}
     <details class="ml-4 mt-1 text-xs text-gray-600">
         <summary class="cursor-pointer">OpenSSH connection details</summary>
         <div class="space-y-1 p-2">

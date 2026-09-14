@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scripthut.login_config import BrowserLoginConfig
+
 
 class EnvRule(BaseModel):
     """A single environment-resolution rule.
@@ -911,6 +913,25 @@ class Stack(BaseModel):
 
 class ScriptHutConfig(BaseModel):
     """Root configuration model for scripthut.yaml."""
+
+    browser_login: BrowserLoginConfig = Field(default_factory=BrowserLoginConfig)
+
+    @model_validator(mode="after")
+    def validate_browser_login(self) -> "ScriptHutConfig":
+        login = self.browser_login
+        if login.enabled:
+            host = self.get_backend(login.host_backend)
+            ssh = getattr(host, "ssh", None)
+            if (
+                ssh is None or ssh.transport != "asyncssh" or ssh.known_hosts is None
+                or ssh.host not in ("localhost", "127.0.0.1", "::1")
+            ):
+                raise ValueError("Login host_backend must use verified AsyncSSH over loopback")
+            for name in login.profiles:
+                target = getattr(self.get_backend(name), "ssh", None)
+                if target is None or target.transport != "openssh":
+                    raise ValueError("Browser login targets must use OpenSSH socket transport")
+        return self
 
     @model_validator(mode="before")
     @classmethod

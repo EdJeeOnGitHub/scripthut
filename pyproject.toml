@@ -41,6 +41,7 @@ docs = [
     "mkdocs-redirects>=1.2.0",
     "mike>=2.0.0",
 ]
+browser-tests = ["playwright==1.56.0"]
 
 [project.scripts]
 scripthut = "scripthut.main:run"

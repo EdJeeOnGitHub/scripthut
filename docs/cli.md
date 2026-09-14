@@ -81,12 +81,43 @@ Project-local files may **only** define `stacks`, `workflows`, `projects`, `env`
 scripthut workflow list                       # show all workflows and projects
 scripthut workflow view <name>                # dry-run preview the tasks
 scripthut workflow view <name> --backend <b>  # preview against a different backend
-scripthut workflow run <name>                 # submit a run
-scripthut workflow run <name> --backend <b>   # submit, overriding the backend
-scripthut workflow run <sflow.json> --project <name>   # submit from a git project
+scripthut workflow run train.json --source project --backend cluster
+scripthut workflow run train.json --source project --backend cluster --branch experiment
+scripthut workflow run train.json --source project --backend cluster --commit FULL_40_CHARACTER_SHA
 ```
 
 `workflow run` prints the new run's ID and a link/path you can pass straight to `scripthut run watch <id>`.
+
+For Git sources, `--commit` selects an exact, lowercase, full 40-character commit
+SHA. Push the commit to the configured repository before submission. Short SHAs,
+ref expressions and combining `--branch` with `--commit` are rejected. Without
+`--commit`, the HTTP API resolves the selected (or configured) branch once, then
+uses that same SHA for workflow discovery, project configuration and execution.
+Fetch failures stop submission; cached workflows are not a fallback.
+
+On SSH backends such as Slurm, each pinned HTTP workflow run gets a fresh detached
+checkout under `<clone_dir>/runs/<full-sha>-<unique-id>`. ScriptHut verifies `HEAD`
+and that tracked files are unchanged after `postclone`, before scheduling any
+work. Preparation hooks therefore run per submission and must preserve tracked
+source. Prior runs cannot contaminate another run's checkout. Relative task
+working directories resolve inside this checkout; commands and explicitly absolute
+working directories retain their existing meaning. Checkouts, including failed
+preparations, are retained; this feature does not add automatic cleanup.
+
+The submit response and run details expose `commit_hash` as the full SHA. An
+explicit SHA has no asserted branch in the run record. Path sources do not accept
+commit selection. This does not upload unpushed commits, provision datasets, or
+lock scientific dependencies outside the repository.
+
+The CLI sends exact requests to `POST /api/v1/sources/{name}/run-commit` with query
+parameters `workflow`, `backend`, and required `commit`. This distinct endpoint
+ensures older servers reject the request instead of ignoring an unfamiliar
+parameter and executing the default branch. Upgrade both server and CLI before
+using `--commit`; do not retry a rejected exact request through the old endpoint.
+Branch submissions continue to use `/api/v1/sources/{name}/run`. The web UI and
+other internal callers that do not supply a resolved SHA retain their legacy
+checkout behavior.
+
 
 ## `run` — inspect and control runs
 
