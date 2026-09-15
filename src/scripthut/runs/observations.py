@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import astuple, dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -55,8 +56,8 @@ class PollPlan:
 class BackendObservation:
     plan: PollPlan
     accounting_outcome: AccountingOutcome
-    # Keep JobStats' schema without retaining its mutable instances. astuple
-    # copies all fields; readers receive fresh JobStats values each time.
+    # Copy fields without flattening nested ResourceUsage dataclasses.
+    # Readers receive independent values, including nested measurements.
     _rows: tuple[tuple[str, tuple[Any, ...]], ...] = field(repr=False)
 
     def __init__(
@@ -68,14 +69,15 @@ class BackendObservation:
         object.__setattr__(self, "plan", plan)
         object.__setattr__(self, "accounting_outcome", accounting_outcome)
         object.__setattr__(
-            self, "_rows", tuple((key, astuple(value)) for key, value in (accounting or {}).items())
+            self, "_rows", tuple((key, tuple(deepcopy(getattr(value, f.name)) for f in fields(value)))
+                                for key, value in (accounting or {}).items())
         )
         if accounting_outcome != AccountingOutcome.SUCCEEDED and self._rows:
             raise ValueError("Only successful accounting can contain rows")
 
     @property
     def accounting(self) -> dict[str, JobStats]:
-        return {key: JobStats(*values) for key, values in self._rows}
+        return {key: JobStats(*deepcopy(values)) for key, values in self._rows}
 
     @property
     def fresh(self) -> bool:
