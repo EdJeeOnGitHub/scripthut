@@ -355,6 +355,9 @@ def make_api_router(state: AppState) -> APIRouter:
                         "request_key": key,
                     }
             else:
+                from scripthut.projects import require_project
+
+                require_project(task_dict.get("project_id"))
                 if payload.get("artifact_refs"):
                     raise ValueError(
                         "Artifact references require a durable keyed submission"

@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="Durable journal requ
 
 PAYLOAD = {
     "backend": "test",
-    "task": {"id": "bootstrap", "name": "prepare", "command": "true"},
+    "task": {"project_id": "test-project", "id": "bootstrap", "name": "prepare", "command": "true"},
     "retain_until_archived": True,
 }
 

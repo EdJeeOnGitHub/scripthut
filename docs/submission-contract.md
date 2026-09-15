@@ -28,6 +28,14 @@ responses include `id`, `request_key`, and `journal_id`. Unknown top-level field
 return 422. Existing `/tasks/run` callers remain supported, with keyed requests using
 the same journal; retention/artifact options require a key.
 
+New ad-hoc submissions require a nonblank string `task.project_id` (maximum 200
+characters, no surrounding whitespace or control characters). Missing/invalid
+labels return 422 before a request is reserved. The server does not guess from
+commands, run names, or filesystem paths. Exact retries of previously reserved
+keys retain the original contract, including historical unlabeled payloads.
+Clients should adopt project labels before upgrading the controller. The CLI
+resolves repository identity as described in [project attribution](cli.md#project-attribution).
+
 Keys are immutable submission identities. The digest is SHA-256 over sorted, compact
 JSON excluding `request_key`, without inserting defaults. Same key and payload return
 the original run; changed payloads return 409. Contention returns 503 and `Retry-After`.

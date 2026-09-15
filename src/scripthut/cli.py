@@ -359,8 +359,9 @@ class LocalClient:
         self, task_dict: dict, backend: str, run_name: str | None = None,
     ) -> dict[str, Any]:
         from scripthut.runs.models import TaskDefinition
+        from scripthut.projects import attributed_task
 
-        task = TaskDefinition.from_dict(task_dict)
+        task = TaskDefinition.from_dict(attributed_task(task_dict))
         run = await self.runtime.run_manager.create_adhoc_run(
             task, backend, run_name=run_name,
         )
@@ -627,7 +628,9 @@ class RemoteClient:
     ) -> dict[str, Any]:
         # Server endpoint takes a JSON body via POST; the rest of the
         # RemoteClient uses query params so we need the raw httpx call here.
-        body: dict[str, Any] = {"task": task_dict, "backend": backend}
+        from scripthut.projects import attributed_task
+
+        body: dict[str, Any] = {"task": attributed_task(task_dict), "backend": backend}
         if run_name is not None:
             body["run_name"] = run_name
         if self._client is None:
@@ -2451,6 +2454,7 @@ def _build_adhoc_task_dict(args: argparse.Namespace) -> dict:
         ("working_dir", "working_dir"),
         ("gres", "gres"),
         ("image", "image"),
+        ("project_id", "project"),
     ):
         val = getattr(args, attr, None)
         if val is not None:
@@ -2492,11 +2496,16 @@ def _build_adhoc_task_dict(args: argparse.Namespace) -> dict:
     if "name" not in base:
         base["name"] = base["id"]
 
-    return base
+    from scripthut.projects import attributed_task
+
+    return attributed_task(base)
 
 
 async def _cmd_task_run(args: argparse.Namespace) -> int:
-    task_dict = _build_adhoc_task_dict(args)
+    try:
+        task_dict = _build_adhoc_task_dict(args)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     if args.dry_run:
         # Print the assembled TaskDefinition and exit without hitting any
@@ -4151,6 +4160,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_tk_run.add_argument(
         "--gres", default=None,
         help="Slurm-style generic resources, e.g. 'gpu:1'",
+    )
+    p_tk_run.add_argument(
+        "--project", default=None,
+        help="Project label (default: Git remote name, or SCRIPTHUT_PROJECT outside Git)",
     )
     p_tk_run.add_argument("--working-dir", dest="working_dir", default=None)
     p_tk_run.add_argument(
