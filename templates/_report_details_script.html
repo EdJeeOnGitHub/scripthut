@@ -1,0 +1,17 @@
+<script>
+// Keep disclosure state across live dashboard replacements.
+(function () {
+    const opened = new Map();
+    document.addEventListener('toggle', function (event) {
+        const detail = event.target;
+        if (detail.matches && detail.matches('details[data-report-detail]') && detail.isConnected) {
+            opened.set(detail.dataset.reportDetail, detail.open);
+        }
+    }, true);
+    document.addEventListener('htmx:afterSwap', function () {
+        document.querySelectorAll('details[data-report-detail]').forEach(function (detail) {
+            if (opened.has(detail.dataset.reportDetail)) detail.open = opened.get(detail.dataset.reportDetail);
+        });
+    });
+})();
+</script>

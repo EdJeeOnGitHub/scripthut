@@ -29,3 +29,17 @@ A bundle may contain an `errors` mapping of allocation IDs to collector errors.
 These show an unavailable notice even before a first successful observation.
 `forecast_complete: false` marks missing cluster job observations: displayed
 counts are incomplete and no missing cluster is assumed idle.
+
+The overview and backends page show each allocation once, keyed by its snapshot
+ID. Backend links jump to the shared allocation card. The default view shows a
+single balance/usage figure and the segmented bar. Guideline labels, overages,
+staleness and incomplete forecasts remain visible; account, period, source,
+refresh time and the exact forecast breakdown live in expandable details.
+Details support keyboard activation and retain their open state across SSE swaps.
+
+Backend capacity cards show at most three distinct configured partitions, with
+one percentage per bar and exact counts in capacity details. Slurm's custom
+`sinfo` format can split a partition by node hardware even with `--summarize`;
+CPU and node counts are combined within that partition before percentages are
+calculated. Different partitions are never added together because they can share
+nodes. Heterogeneous memory/features are left unspecified at partition level.

@@ -1,33 +1,80 @@
+{% macro amount(value) -%}{{ '{:,.1f}'.format(value) }}{%- endmacro %}
+
+{% macro allocation_links(rows) %}
+{% for a in rows %}
+<a href="#allocation-{{ a.id | urlencode }}" class="text-xs text-blue-600 hover:text-blue-800">
+    {{ 'Shared allocation' if a.backends | length > 1 else 'Annual guideline' if a.allowance_type == 'guideline' else 'Allocation' }} ↗
+</a>
+{% endfor %}
+{% endmacro %}
+
+{% macro allocation_section(by_backend) %}
+{% set unique = namespace(ids=[], rows=[]) %}
+{% for rows in by_backend.values() %}{% for a in rows %}
+{% if a.id not in unique.ids %}{% set unique.ids = unique.ids + [a.id] %}{% set unique.rows = unique.rows + [a] %}{% endif %}
+{% endfor %}{% endfor %}
+{% if unique.rows %}
+<section class="mt-6" aria-label="Allocations">
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Allocations</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
+    {% for a in unique.rows %}
+        <div id="allocation-{{ a.id | urlencode }}" class="bg-white rounded-lg shadow-md p-4 scroll-mt-4 min-w-0">
+            {{ allocation_bar(a) }}
+        </div>
+    {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endmacro %}
+
 {% macro allocation_bar(a, detailed=false) %}
-<div class="mt-3 text-xs min-w-0" aria-label="Allocation {{ a.account }}">
-  <div class="flex flex-wrap justify-between gap-1 text-gray-600">
-    <span class="font-medium">{{ 'Annual guideline' if a.allowance_type == 'guideline' else 'Allocation' }} · {{ a.account }}</span>
-    <span>{{ a.period_label }}</span>
+<div class="text-xs min-w-0" aria-label="Allocation {{ a.account }}">
+  <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-2">
+    <span class="font-semibold text-gray-800">{{ a.backends | join(' / ') }}</span>
+    <span class="text-gray-500">{{ 'Annual guideline' if a.allowance_type == 'guideline' else 'Shared allocation' if a.backends | length > 1 else 'Allocation' }}</span>
   </div>
-  {% if a.backends | length > 1 %}<div class="text-gray-500">Shared balance: {{ a.backends | join(', ') }}</div>{% endif %}
+  <div class="text-sm font-medium {{ 'text-red-700' if a.excess else 'text-gray-700' }}">
+    {% if a.excess %}
+      {{ amount(a.excess) }} {{ a.unit }} {{ 'projected over' if (a.running.estimate or 0) + (a.queued.estimate or 0) > 0 else 'over' }} {{ 'guideline' if a.allowance_type == 'guideline' else 'budget' }}
+    {% elif a.allowance_type == 'guideline' or a.remaining is none %}
+      {{ amount(a.used) }} {{ a.unit }} used
+    {% else %}
+      {{ amount(a.remaining) }} {{ a.unit }} remaining
+    {% endif %}
+  </div>
   {% if a.allowance %}
-  <div class="flex h-2 w-full overflow-hidden rounded bg-gray-200 my-1.5" role="img" aria-label="Used {{ a.used }} {{ a.unit }}, running estimate {{ a.running.estimate }}, queued estimate {{ a.queued.estimate }}. Remaining {{ a.remaining }}.">
-    <span class="bg-blue-600" style="width: {{ a.widths[0] }}%" title="Reported usage"></span>
-    <span class="bg-blue-300" style="width: {{ a.widths[1] }}%" title="Additional running estimate"></span>
-    <span class="bg-amber-400" style="width: {{ a.widths[2] }}%" title="Queued estimate"></span>
+  <div tabindex="0" class="flex h-2 w-full overflow-hidden rounded bg-gray-200 my-2 focus:outline-blue-600" role="img"
+       title="Used {{ amount(a.used) }} {{ a.unit }} · running estimate {{ amount(a.running.estimate) if a.running.estimate is not none else 'unknown' }} · queued estimate {{ amount(a.queued.estimate) if a.queued.estimate is not none else 'unknown' }} · remaining {{ amount(a.remaining) if a.remaining is not none else 'unknown' }}. Open details for the breakdown."
+       aria-label="Used {{ a.used }} {{ a.unit }}, running estimate {{ a.running.estimate }}, queued estimate {{ a.queued.estimate }}. Remaining {{ a.remaining }}. Allowance {{ a.allowance }}.{{ ' Forecast incomplete.' if a.partial else '' }}">
+    <span class="bg-blue-600" style="width: {{ a.widths[0] }}%"></span>
+    <span class="bg-blue-300" style="width: {{ a.widths[1] }}%"></span>
+    <span class="bg-amber-400" style="width: {{ a.widths[2] }}%"></span>
   </div>
   {% endif %}
-  <div class="flex flex-wrap gap-x-3 gap-y-1 text-gray-700">
-    <span>Used {{ '{:,.1f}'.format(a.used) }} {{ a.unit }}</span>
-    {% for label, f in [('Running', a.running), ('Queued', a.queued)] %}
-    <span>{{ label }} {% if f.estimate is not none %}≈{{ '{:,.1f}'.format(f.estimate) }}{% else %}unknown{% endif %} ({% if a.forecast_complete is defined and not a.forecast_complete %}job count incomplete{% else %}{{ f.jobs }} jobs{% endif %}){% if f.unpriced_jobs %}; {{ f.unpriced_jobs }} unpriced{% endif %}</span>
-    {% endfor %}
-    <span>Remaining {% if a.remaining is not none %}{{ '{:,.1f}'.format(a.remaining) }}{% else %}unknown{% endif %}</span>
-  </div>
-  {% if a.excess %}<div class="text-red-700">{{ '{:,.1f}'.format(a.excess) }} {{ a.unit }} over {{ 'guideline' if a.allowance_type == 'guideline' else 'budget' }} including priced estimates</div>{% endif %}
-  {% if a.stale %}<div class="text-amber-700">Stale allocation report{% if a.error %} · {{ a.error }}{% endif %}</div>{% endif %}
-  {% if a.partial %}<div class="text-amber-700">Forecast incomplete; unknown costs are not zero.</div>{% endif %}
-  <details class="mt-1 text-gray-500" {% if detailed %}open{% endif %}>
-    <summary class="cursor-pointer">Allocation details</summary>
-    <p>Allowance: {{ a.allowance if a.allowance is not none else 'unknown' }} {{ a.unit }}. Projected headroom: {{ '{:,.1f}'.format(a.headroom) if a.headroom is not none else 'unknown' }} {{ a.unit }}{% if a.partial %} (priced jobs only){% endif %}.</p>
+  {% if a.remaining is none %}<p class="text-amber-700">Balance unavailable</p>{% endif %}
+  {% if a.stale %}<p class="text-amber-700">Stale allocation report</p>{% endif %}
+  {% if a.partial %}<p class="text-amber-700">Forecast incomplete</p>{% endif %}
+  <details data-report-detail="allocation-{{ a.id }}" class="mt-2 text-gray-500" {% if detailed %}open{% endif %}>
+    <summary class="cursor-pointer hover:text-gray-700">Allocation details</summary>
+    <div class="mt-2 space-y-2 break-words">
+    <p>Account: {{ a.account }} · {{ a.period_label }}</p>
+    {% if a.backends | length > 1 %}<p>Shared balance: {{ a.backends | join(', ') }}</p>{% endif %}
+    <dl class="grid grid-cols-2 gap-x-3 gap-y-1">
+      <dt>Used</dt><dd>{{ amount(a.used) }} {{ a.unit }}</dd>
+      {% for label, f in [('Running', a.running), ('Queued', a.queued)] %}
+      <dt>{{ label }} estimate</dt><dd>{% if f.estimate is not none %}≈{{ amount(f.estimate) }} {{ a.unit }}{% else %}unknown{% endif %}
+      ({% if a.forecast_complete is defined and not a.forecast_complete %}job count incomplete{% else %}{{ f.jobs }} {{ 'job' if f.jobs == 1 else 'jobs' }}{% endif %}){% if f.unpriced_jobs %}; {{ f.unpriced_jobs }} unpriced{% endif %}</dd>
+      {% endfor %}
+      <dt>Remaining</dt><dd>{{ amount(a.remaining) if a.remaining is not none else 'unknown' }} {{ a.unit }}</dd>
+      <dt>Allowance</dt><dd>{{ amount(a.allowance) if a.allowance is not none else 'unknown' }} {{ a.unit }}</dd>
+      <dt>Projected headroom</dt><dd>{{ amount(a.headroom) if a.headroom is not none else 'unknown' }} {{ a.unit }}{% if a.partial %} (priced jobs only){% endif %}</dd>
+    </dl>
+    {% if a.partial %}<p>Unknown costs are not zero.</p>{% endif %}
+    {% if a.error %}<p>{{ a.error }}</p>{% endif %}
     <p>Source: {{ a.source }} · observed {{ a.observed_at }}{% if a.source_as_of %} · source as of {{ a.source_as_of }}{% endif %}</p>
     <p>Blue: reported usage. Light blue: additional running estimate. Amber: queued estimate. Gray: projected headroom. Remaining is the reported balance before estimates.</p>
     <p>Forecasts use requested time limits and assume queued jobs start now. They are not reservations; early completion and accounting delays change the result. {{ a.notes or '' }}</p>
+    </div>
   </details>
 </div>
 {% endmacro %}

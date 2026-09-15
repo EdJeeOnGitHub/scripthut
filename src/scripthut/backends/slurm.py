@@ -659,7 +659,8 @@ class SlurmBackend(JobBackend):
         )
 
     async def _fetch_partitions(self) -> list[PartitionInfo] | None:
-        # Aggregate one row per partition with %P (default marked with *).
+        # A custom format overrides --summarize; hardware features can split
+        # a partition across disjoint node groups. Merge those counts below.
         # Fields: PartitionName | Avail | A/I/O/T cpus | total nodes | mem/node | timelimit | features
         fmt = "%P|%a|%C|%D|%m|%l|%f"
         cmd = f"sinfo --noheader --summarize --format='{fmt}'"
@@ -720,7 +721,22 @@ class SlurmBackend(JobBackend):
                 is_default=is_default,
             ))
 
-        return partitions
+        grouped: dict[str, PartitionInfo] = {}
+        for row in partitions:
+            if row.name not in grouped:
+                grouped[row.name] = row
+                continue
+            target = grouped[row.name]
+            for key in ('cpus_allocated', 'cpus_idle', 'cpus_other', 'cpus_total', 'nodes_total'):
+                setattr(target, key, getattr(target, key) + getattr(row, key))
+            target.is_default = target.is_default or row.is_default
+            # Do not present one node group's hardware as partition-wide.
+            for key in ('mem_per_node_mb', 'features', 'timelimit'):
+                if getattr(target, key) != getattr(row, key):
+                    setattr(target, key, None)
+            if target.state != row.state:
+                target.state = 'mixed'
+        return list(grouped.values())
 
     async def _fetch_node_info(self) -> dict[str, _PartitionNodeStats]:
         """Return per-partition node-level availability for scheduling hints.

@@ -63,7 +63,7 @@ def test_render_has_bounded_bar_shared_label_and_explicit_unknowns():
     assert 'Shared balance: cluster-a, cluster-b' in html
     assert '2 unpriced' in html
     assert 'Forecast incomplete' in html
-    assert 'Remaining 60.0' in html
+    assert '60.0 SU remaining' in html
 
 
 def test_first_failure_and_partial_cluster_coverage_are_visible(tmp_path):
@@ -73,3 +73,43 @@ def test_first_failure_and_partial_cluster_coverage_are_visible(tmp_path):
     row=sample(); row['forecast_complete']=False
     result=view(row,NOW)
     assert result['partial']
+
+
+def test_shared_allocation_renders_once_and_metadata_is_collapsed():
+    env = Environment(loader=FileSystemLoader(str(Path(__file__).parents[1]/'templates')), autoescape=True)
+    row = view(sample(), NOW)
+    html = env.get_template('_allocation.html').module.allocation_section(
+        {'cluster-a': [row], 'cluster-b': [row]})
+    assert html.count('id="allocation-shared"') == 1
+    assert html.count('Allocation details') == 1
+    summary, details = html.split('<details', 1)
+    assert '60.0 SU remaining' in summary
+    assert 'site accounting' not in summary and '2026' not in summary
+    assert 'site accounting' in details and '2026' in details
+    assert ' open' not in details.split('>', 1)[0]
+
+
+def test_guideline_and_unknown_forecasts_remain_visible_without_zero_captions():
+    env = Environment(loader=FileSystemLoader(str(Path(__file__).parents[1]/'templates')), autoescape=True)
+    row = sample(); row.update(allowance_type='guideline')
+    row['queued'] = {'jobs': 2, 'unpriced_jobs': 2, 'estimate': None}
+    html = env.get_template('_allocation.html').module.allocation_bar(view(row, NOW))
+    summary = html.split('<details', 1)[0]
+    assert 'Annual guideline' in summary and '40.0 SU used' in summary
+    assert 'Forecast incomplete' in summary
+    assert '(1 job)' not in summary
+
+
+def test_backends_page_links_to_one_shared_balance():
+    import scripthut.main as main
+    from scripthut.models import ConnectionStatus
+    from scripthut.runtime import BackendState
+
+    row = view(sample(), NOW)
+    backends = {name: BackendState(name=name, backend_type='slurm',
+        status=ConnectionStatus(connected=True, host=name)) for name in row['backends']}
+    html = main.templates.get_template('backends_status.html').render(
+        backends=backends, allocation_reports={name: [row] for name in backends},
+        backend_usage={})
+    assert html.count('id="allocation-shared"') == 1
+    assert html.count('href="#allocation-shared"') == 2
