@@ -341,3 +341,28 @@ async def test_later_arriving_older_queue_is_ignored(lifecycle):
     late = observation(manager, when=NOW - timedelta(seconds=1))
     await manager.apply_backend_observations([late])
     assert item.status == Status.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_nested_resource_accounting_survives_observation_and_reporting(lifecycle, tmp_path):
+    from scripthut.reports.resources import ResourceUsage
+    from scripthut.reports.efficiency import EfficiencyStore
+
+    manager, run, item, _, _ = lifecycle
+    usage = ResourceUsage(elapsed_seconds=20, allocated_cpu_seconds=40,
+                          consumed_cpu_seconds=30, reported_peak_bytes=1024)
+    obs = observation(manager, stats={"42": JobStats(
+        75, "1K", "30s", end_time=NOW, state="COMPLETED", exit_code=0,
+        resource_usage=usage)})
+    usage.consumed_cpu_seconds = 999
+    first = obs.accounting["42"].resource_usage
+    assert isinstance(first, ResourceUsage)
+    assert first.consumed_cpu_seconds == 30
+    first.consumed_cpu_seconds = 888
+    assert obs.accounting["42"].resource_usage.consumed_cpu_seconds == 30
+    await manager.apply_backend_observations([obs])
+    assert item.to_dict()["resource_usage"]["consumed_cpu_seconds"] == 30
+    store = EfficiencyStore(tmp_path / "efficiency.sqlite")
+    store.record_runs([run])
+    records = store.records(NOW - timedelta(days=1), NOW + timedelta(days=1))
+    assert records[0]["usage"]["consumed_cpu_seconds"] == 30
