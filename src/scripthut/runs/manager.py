@@ -318,6 +318,13 @@ class RunManager:
             new_tasks, child_doc_env, child_doc_groups = (
                 TaskDefinition.parse_document(data)
             )
+            from scripthut.projects import require_project
+
+            for child in new_tasks:
+                if child.project_id is None:
+                    child.project_id = item.task.project_id
+                if child.project_id is not None:
+                    require_project(child.project_id)
         except ValueError as e:
             logger.error(f"Invalid generates_source JSON '{path}': {e}")
             return
@@ -797,6 +804,15 @@ class RunManager:
         if not tasks:
             raise ValueError(f"No tasks for workflow '{workflow_name}'")
 
+        from scripthut.projects import repository_name, require_project
+
+        default_project = repository_name(git_repo) if git_repo else source_name
+        for task in tasks:
+            if task.project_id is None and default_project:
+                task.project_id = default_project
+            if task.project_id is not None:
+                require_project(task.project_id)
+
         self._resolve_wildcard_deps(tasks)
         self._validate_dependencies(tasks)
 
@@ -967,7 +983,15 @@ class RunManager:
             stack, hash_, rebuild,
         )
 
+        from scripthut.projects import repository_name
+
+        source = self.config.get_source(source_name) if source_name else None
+        project = (
+            repository_name(source.url) if isinstance(source, GitSourceConfig)
+            else source_name or "scripthut"
+        )
         task = TaskDefinition(
+            project_id=project,
             id=f"install-{hash_[:8]}",
             name=f"stack/{stack.name}",
             command=command,
@@ -1001,7 +1025,13 @@ class RunManager:
         backend = payload["backend"]
         if self.config.get_backend(backend) is None:
             raise ValueError(f"Backend '{backend}' not found")
+        from scripthut.projects import require_project
+
         with journal.lease(key):
+            # Preserve exact retries of pre-enforcement accepted requests.
+            # Reject new unlabeled requests before reserving an execution ID.
+            if journal.lookup(key) is None:
+                require_project(payload["task"].get("project_id"))
             record = journal.reserve(key, payload)
             run = self.runs.get(record["run_id"])
             if run is None and self.storage is not None:
@@ -1106,6 +1136,9 @@ class RunManager:
         Raises ``ValueError`` if the backend isn't in the config or
         doesn't have an available driver.
         """
+        from scripthut.projects import require_project
+
+        require_project(task.project_id)
         if self.config.get_backend(backend_name) is None:
             raise ValueError(f"Backend '{backend_name}' not found in config")
 

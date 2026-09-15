@@ -113,7 +113,7 @@ class TestHandleGeneratesSource:
         generated_json = json.dumps({
             "tasks": [
                 {"id": "sim-0", "name": "Sim 0", "command": "echo 0"},
-                {"id": "sim-1", "name": "Sim 1", "command": "echo 1"},
+                {"id": "sim-1", "name": "Sim 1", "command": "echo 1", "project_id": "override"},
             ]
         })
 
@@ -125,11 +125,14 @@ class TestHandleGeneratesSource:
             "gen", RunItemStatus.COMPLETED,
             generates_source="/path/to/tasks.json",
         )
+        item.task.project_id = "parent-repo"
         run = _make_run(items=[item])
 
         await manager._handle_generates_source(run, item)
 
         assert len(run.items) == 3  # original + 2 new
+        assert run.items[1].task.project_id == "parent-repo"
+        assert run.items[2].task.project_id == "override"
         assert run.items[1].task.id == "sim-0"
         assert run.items[2].task.id == "sim-1"
         assert run.items[1].status == RunItemStatus.PENDING

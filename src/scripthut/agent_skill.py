@@ -109,6 +109,9 @@ Submit and track:
    add `--branch <name>` to run from a different branch of a git source
    (the workflow file and repo config are read at that branch's tip).
    Ad-hoc tasks use `scripthut task run` with the same `--json` shape.
+   Project labels default to the calling Git repository's remote name. Outside
+   Git, set `SCRIPTHUT_PROJECT` or pass `--project`. Direct HTTP callers must
+   supply `task.project_id`; never invent a label from a job name.
 8. **Get notified — don't poll.** Against a running server (the local
    daemon counts), `scripthut run watch $RUN_ID --exit-status` blocks
    until the run is terminal, prints a one-line verdict (`Run … COMPLETED`

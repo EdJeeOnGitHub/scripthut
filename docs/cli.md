@@ -273,6 +273,33 @@ scripthut task run "julia --project=. scripts/run.jl" \
 
 Stacks are installed once; ad-hoc tasks reference them via their resolved `STACK_DIR` in the command or working directory.
 
+### Project attribution
+
+`task run` fills `task.project_id` from the Git remote repository name in the
+**calling directory**, including subdirectories and worktrees. It prefers `origin`,
+or the sole remote when there is no origin. Renaming a checkout does not change
+its project. `--working-dir` is a backend execution path, not attribution evidence.
+
+An explicit `--project NAME` or JSON `project_id` takes precedence. Outside Git,
+`SCRIPTHUT_PROJECT` supplies a workspace default; otherwise `--project` is required.
+A checkout without an unambiguous remote requires an explicit label. `--dry-run`
+shows the resolved label. The local and remote Python clients use the same rules.
+
+Direct HTTP submissions must include a nonblank string `task.project_id`; the
+server cannot inspect the caller's repository. Missing or invalid values return
+422 before new work is reserved or submitted. Existing durable request keys retain
+their original payload and retry behavior. Upgrade callers before the controller.
+
+Git-source workflows use their configured repository URL as the default. Path-source
+workflows use their configured source name. Source stack installations follow the
+same convention; global stack installations belong to `scripthut`. Explicit task
+labels take precedence. Generated tasks inherit their parent unless explicitly
+labeled. Tasks receive `SCRIPTHUT_PROJECT` in their runtime environment so nested
+CLI submissions outside a checkout retain the project (normal env overrides apply).
+
+Historical records and scheduler-discovered jobs may still lack a label. See
+[historical attribution](project-attribution.md) for the read-only audit procedure.
+
 ### Notes for coding agents
 
 - The CLI is the supported entry point — there's no separate "agent API." The `--json` flag plus stable exit codes (`0` submitted, `1` error) are the contract.
