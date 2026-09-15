@@ -1,9 +1,8 @@
 {% for alert in allocation_alerts | default([]) %}<p class="text-sm text-amber-700 mb-2">{{ alert }}</p>{% endfor %}
-{% from '_allocation.html' import allocation_bar %}
+{% from '_allocation.html' import allocation_section, allocation_links %}
 {% if backends %}
 <div class="space-y-2">
     {% for name, backend in backends.items() %}
-    {% for a in (allocation_reports | default({})).get(name, []) %}{{ allocation_bar(a) }}{% endfor %}
     <div
         class="flex flex-col sm:flex-row sm:items-center sm:justify-between p-2 rounded gap-2 {% if not backend.enabled %}bg-gray-100{% elif backend.status.connected %}bg-green-50{% else %}bg-red-50{% endif %}">
         <!-- Top row: name + toggle -->
@@ -13,6 +12,7 @@
                     class="w-2.5 h-2.5 rounded-full flex-shrink-0 {% if not backend.enabled %}bg-gray-400{% elif backend.status.connected %}bg-green-500{% else %}bg-red-500{% endif %}"></span>
                 <span class="font-medium text-gray-800 {% if not backend.enabled %}opacity-50{% endif %}">{{ name }}</span>
                 <span class="text-xs text-gray-500 {% if not backend.enabled %}opacity-50{% endif %}">({{ backend.backend_type }})</span>
+                {{ allocation_links((allocation_reports | default({})).get(name, [])) }}
             </div>
             <!-- Toggle visible on mobile next to name -->
             <div class="flex items-center gap-2 sm:hidden">
@@ -225,3 +225,5 @@
 {% else %}
 <p class="text-sm text-gray-500">No backends configured</p>
 {% endif %}
+
+{{ allocation_section(allocation_reports | default({})) }}
