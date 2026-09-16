@@ -1218,7 +1218,7 @@ async def efficiency_page(request: Request, start: str = "", end: str = "",
         if state.run_storage:
             store = state.run_storage.efficiency_store
             runs = list(state.run_manager.runs.values()) if state.run_manager else []
-            await asyncio.to_thread(store.safe_record, runs)
+            await asyncio.to_thread(store.record_runs, runs)
             rows = await asyncio.to_thread(store.records, beginning, ending,
                 backend=backend, project=project, workflow=workflow)
     except ValueError as exc:
@@ -1227,7 +1227,8 @@ async def efficiency_page(request: Request, start: str = "", end: str = "",
         logger.exception("Efficiency report unavailable")
         error = "Efficiency history is temporarily unavailable."
     return templates.TemplateResponse("efficiency.html", {
-        "request": request, "report": report(rows, sort), "error": error,
+        "request": request, "report": report(rows, sort, state.config.settings.efficiency if state.config else None), "error": error,
+        "efficiency_policy": state.config.settings.efficiency if state.config else None,
         "filters": dict(start=start, end=end, backend=backend, project=project, workflow=workflow, sort=sort),
         "resources": ResourceUsage.from_dict,
         "live_run_ids": set(state.run_manager.runs) if state.run_manager else set(),
@@ -3457,7 +3458,7 @@ def parse_args() -> argparse.Namespace:
 # import cost — and trigger asyncssh / runtime imports — just to start the web
 # server. Must stay in sync with the top-level parsers in cli.py.
 _CLI_SUBCOMMANDS = frozenset(
-    {"workflow", "run", "backend", "source", "stack", "agent", "task", "status", "daemon", "disk"}
+    {"workflow", "run", "backend", "source", "stack", "agent", "task", "status", "daemon", "disk", "efficiency"}
 )
 _SUBCOMMANDS = _CLI_SUBCOMMANDS | {"setup-aws-ec2"}
 

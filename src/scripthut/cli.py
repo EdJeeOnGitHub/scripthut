@@ -434,6 +434,10 @@ class LocalClient:
             "Run a scripthut server and re-run with `--server <url>`."
         )
 
+    async def efficiency(self, kind, **params):
+        from scripthut.reports.query import query
+        return await asyncio.to_thread(query, self.runtime, kind, **params)
+
     async def view_run(self, run_id: str) -> dict[str, Any]:
         # Local mode reads from storage rather than in-memory state since
         # we don't restore on startup.
@@ -659,6 +663,17 @@ class RemoteClient:
             f"/sources/{source}/{endpoint}", workflow=workflow, backend=backend,
             branch=branch, commit=commit,
         )
+
+    async def efficiency(self, kind, **params):
+        from urllib.parse import quote
+        run_id = params.pop('run_id', '')
+        path = '/efficiency/' + ('runs/' + quote(run_id, safe='') if kind == 'run' else kind)
+        response = await self._client.get(path, params=params)
+        if response.status_code == 404:
+            if kind == 'run':
+                raise RuntimeError('No retained efficiency history for that run, or server lacks efficiency reporting; check efficiency summary')
+            raise RuntimeError('Server lacks efficiency reporting; upgrade the server before using this command')
+        return self._handle(response)
 
     async def view_run(self, run_id: str) -> dict[str, Any]:
         return await self._get(f"/runs/{run_id}")
@@ -3714,6 +3729,46 @@ async def _cmd_run_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_efficiency(data):
+    def pct(value):
+        return 'unknown' if value is None else f'{value:.1f}%'
+    p, overall = data['targets'], data['overall']
+    lines = [f"Evidence: {data['evidence']}",
+             f"Targets: CPU >= {p['cpu_min_percent']:g}%; peak RAM ~{p['memory_target_percent']:g}%; OOM/timeout < {p['resource_failure_max_percent']:g}%",
+             f"Attempts: {overall['jobs']} | CPU {pct(overall['cpu_efficiency'])} | median peak RAM {pct(overall['memory_median_percent'])}",
+             f"OOMs: {overall['oom']} | timeouts: {overall['timeouts']} | combined {pct(overall['resource_failure_percent'])} of {overall['eligible_attempts']} eligible attempts",
+             f"Coverage: CPU {overall['cpu_measured']}, RAM {overall['memory_measured']}, unknown outcomes {overall['unknown_outcomes']}",
+             f"Assessment: {overall['assessment']} (limited evidence: {overall['limited_evidence']})"]
+    if data.get('window'):
+        lines.append(f"UTC: {data['window']['start']} through {data['window']['end']} (exclusive)")
+    if 'jobs' in data:
+        lines.append('RUN / TASK / JOB | BACKEND | CPU | RAM | OUTCOME')
+        for row in data['jobs']:
+            lines.append(f"{row['run_id']} / {row['task_id']} / {row['job_id']} | {row['backend']} | {pct(row['cpu_efficiency'])} | {pct(row['memory_percent'])} | {row['scheduler_state'] or row['status']}")
+        lines.append(f"Showing {len(data['jobs'])} of {data['total']} attempts; offset {data['offset']}")
+    else:
+        lines.append('PROJECT | ATTEMPTS | CPU | RAM | OOM/TIMEOUT')
+        for row in data['projects']:
+            lines.append(f"{row['project']} | {row['jobs']} | {pct(row['cpu_efficiency'])} | {pct(row['memory_median_percent'])} | {row['resource_failures']}")
+    return '\n'.join(lines)
+
+
+async def _cmd_efficiency(args):
+    from scripthut.projects import submission_project
+    params = dict(limit=args.limit, offset=args.offset) if args.efficiency_cmd != 'summary' else {}
+    if args.efficiency_cmd == 'run':
+        params['run_id'] = args.id
+    else:
+        params.update(days=args.days, backend=args.backend or '', workflow=args.workflow or '',
+                      project='' if args.all_projects else submission_project(args.project))
+    async with _make_client(args) as client:
+        data = await client.efficiency(args.efficiency_cmd, **params)
+    if args.json:
+        return _emit_json(data)
+    print(_format_efficiency(data))
+    return 0
+
+
 async def _cmd_run_view(args: argparse.Namespace) -> int:
     async with _make_client(args) as client:
         data = await client.view_run(args.id)
@@ -3999,6 +4054,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(p_wf_run)
     p_wf_run.set_defaults(handler=_cmd_workflow_run)
+
+    p_eff = sub.add_parser('efficiency', help='Inspect resource usage and advisory targets')
+    eff_sub = p_eff.add_subparsers(dest='efficiency_cmd', required=True)
+    for kind in ('summary', 'jobs', 'run'):
+        command = eff_sub.add_parser(kind)
+        if kind == 'run':
+            command.add_argument('id')
+        else:
+            command.add_argument('--days', type=int, default=30)
+            scope = command.add_mutually_exclusive_group()
+            scope.add_argument('--project')
+            scope.add_argument('--all-projects', action='store_true')
+            command.add_argument('--backend')
+            command.add_argument('--workflow')
+        if kind != 'summary':
+            command.add_argument('--limit', type=int, default=100)
+            command.add_argument('--offset', type=int, default=0)
+        _add_common(command)
+        command.set_defaults(handler=_cmd_efficiency)
 
     # ----- run --------------------------------------------------------------
     p_run = sub.add_parser("run", help="Inspect and control runs")

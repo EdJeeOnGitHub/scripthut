@@ -755,8 +755,25 @@ class CliAuthConfig(BaseModel):
     )
 
 
+class EfficiencyPolicy(BaseModel):
+    """Advisory targets; never submission admission rules."""
+    cpu_min_percent: float = Field(default=80, gt=0, le=100)
+    memory_target_percent: float = Field(default=70, gt=0, le=100)
+    memory_tolerance_percent: float = Field(default=10, ge=0, lt=100)
+    resource_failure_max_percent: float = Field(default=1, gt=0, le=100)
+    minimum_attempts: int = Field(default=100, ge=1)
+
+    @model_validator(mode="after")
+    def valid_memory_range(self):
+        if not 0 <= self.memory_target_percent - self.memory_tolerance_percent <= self.memory_target_percent + self.memory_tolerance_percent <= 100:
+            raise ValueError("Memory target range must lie within 0–100 percent")
+        return self
+
+
 class GlobalSettings(BaseModel):
     """Global application settings."""
+
+    efficiency: EfficiencyPolicy = Field(default_factory=EfficiencyPolicy)
 
     poll_interval: int = Field(
         default=60,

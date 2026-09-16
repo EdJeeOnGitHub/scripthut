@@ -64,3 +64,34 @@ per task. Missing metadata remains unattributed; job names and filesystem paths 
 not treated as evidence. Retained runs reconcile improved attribution into both
 reporting stores. Usage ledger corrections are appended and deduplicated by task
 identity, so deleting the original run does not lose its corrected project label.
+
+## CLI and JSON API
+
+`scripthut efficiency summary --days 7 --json` and `--days 30` report the
+calling Git project's rolling UTC history. `--project NAME` selects another
+project; `--all-projects` selects overall history. `--backend` and `--workflow`
+filter summaries and job lists. `efficiency jobs` returns attempts, newest first,
+with `--limit` (default 100, maximum 1000) and `--offset`. `efficiency run RUN_ID`
+returns retained attempts across all time, including retries, with the same
+pagination. Existing unfinished runs return `no_final_attempts`; unknown runs
+without retained metrics return 404.
+
+The matching endpoints are `/api/v1/efficiency/summary`, `/efficiency/jobs`, and
+`/efficiency/runs/{run_id}`. JSON includes `schema_version`, effective `targets`,
+filters, exact window boundaries, aggregate accounting and coverage, assessments,
+and either project/workflow groups or paginated jobs. Windows select finish time
+with an inclusive start and exclusive end. Empty history is distinct from 503
+unavailable history. Target misses do not change CLI exit status or admission.
+
+Configure optional `settings.efficiency` values: `cpu_min_percent` (80),
+`memory_target_percent` (70), `memory_tolerance_percent` (10),
+`resource_failure_max_percent` (1), and `minimum_attempts` (100). CPU totals are
+weighted by allocated CPU-seconds. RAM assessments use successful whole-job peak
+measurements and retain headroom; unknown or task-scoped peaks are excluded.
+
+Reliability counts terminal scheduler-executed attempts with known outcomes,
+excluding cancellations, submission failures and cache hits. Retries count
+separately. OOMs and timeouts count even without start time or resource accounting.
+Their combined rate must be strictly below the target. Samples below the minimum
+are limited evidence; any resource failure is flagged. All assessments are
+advisory and do not change requests or submit jobs.

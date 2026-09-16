@@ -4,6 +4,8 @@
 {% include 'nav.html' %}
 <h1 class="text-xl font-semibold my-5">Resource efficiency</h1>
 <p class="text-sm text-gray-600 mb-3">Tracked jobs only. CPU totals cover jobs with paired measurements, including failed jobs; memory sizing distributions use successful jobs with comparable measurements. Missing measurements are not zero. Dates filter completion time in UTC.</p>
+{% if efficiency_policy %}<p class="text-sm mb-3">Targets: CPU ≥{{ efficiency_policy.cpu_min_percent }}%; peak RAM ~{{ efficiency_policy.memory_target_percent }}% (±{{ efficiency_policy.memory_tolerance_percent }} points); combined OOM/timeout rate &lt;{{ efficiency_policy.resource_failure_max_percent }}%. Recommendations only.</p>{% endif %}
+<p class="text-sm mb-3">Reliability: {{ report.overall.assessment.reliability }}. {{ report.overall.resource_failures }} OOM/timeouts / {{ report.overall.eligible_attempts }} eligible attempts; {{ report.overall.unknown_outcomes }} unknown outcomes. {% if report.overall.limited_evidence %}Limited evidence; zero observed failures does not establish reliability.{% endif %}</p>
 {% if error %}<p class="text-red-700">{{ error }}</p>{% endif %}
 <form class="flex flex-wrap gap-3 p-4 bg-white rounded shadow mb-5" method="get">
 {% for key, label, kind in [('start','From','date'), ('end','Through','date'), ('backend','Backend','text'), ('project','Project','text'), ('workflow','Workflow','text')] %}
