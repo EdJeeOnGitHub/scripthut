@@ -115,7 +115,7 @@ def test_efficiency_page_has_filters_coverage_and_archived_measurements(tmp_path
     monkeypatch.setattr(main.state, 'run_storage', storage)
     manager=MagicMock(); manager.runs={}
     monkeypatch.setattr(main.state,'run_manager',manager)
-    response=TestClient(main.app).get('/efficiency?start=2026-09-14&end=2026-09-14')
+    response=TestClient(main.app).get('/efficiency?start=2026-09-14&end=2026-09-14&project=study')
     assert response.status_code==200
     assert 'CPU coverage 1/1' in response.text
     assert 'Archived metrics' in response.text

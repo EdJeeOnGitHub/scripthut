@@ -2,7 +2,8 @@
 
 `/efficiency` reports tracked jobs overall, by project, by workflow/backend, and per
 job. Dates select completion time in UTC (inclusive start and end dates); the
-default is the last 30 days. Tables can sort by measured allocated CPU-hours,
+HTML dashboard defaults to the current UTC week. The CLI and JSON API retain
+their rolling 30-day default. Tables can sort by measured allocated CPU-hours,
 lowest CPU efficiency, or lowest comparable memory/request ratio. Job detail
 retains numeric data when a run has been removed, with the newest 200 matching
 jobs shown. No requests are adjusted automatically.
@@ -95,3 +96,30 @@ separately. OOMs and timeouts count even without start time or resource accounti
 Their combined rate must be strictly below the target. Samples below the minimum
 are limited evidence; any resource failure is flagged. All assessments are
 advisory and do not change requests or submit jobs.
+
+
+## Dashboard navigation
+
+The dashboard offers Today (hourly), This week, Last week, Last 30 days, and
+Custom (daily) views. UTC weeks start Monday. In-progress periods compare with
+the same elapsed portion of their preceding period; exact boundaries appear
+above the cards. Explicit `start`/`end` links remain supported as Custom periods.
+
+Three cards summarize CPU efficiency, comparable memory sizing, and resource
+failures against the configured policy. Aligned charts show trends and measured
+allocated CPU-hours. Empty buckets are gaps, not zero utilization. Exact chart
+data is available in an expandable table, including evidence and coverage.
+
+Projects default to Needs attention: reliability breaches first; then CPU or
+memory breaches ordered by CPU-hours short of target and memory-band distance;
+then limited evidence, then projects within assessed targets. The ordering is
+explained on the page. Shortfall-hours are not a savings forecast.
+
+Select a project for workflow/backend summaries and jobs, paginated 50 at a time.
+Expand a job for its requests, measurements, scheduler outcome, and live run link
+when available. Archived job measurements remain accessible. URL filters and
+browser Back preserve reporting context. Reporting does not change requests.
+
+The generated time and latest selected job completion are distinct: neither is
+presented as proof of accounting freshness. Measurement corrections appear on
+refresh. See `docs/design/efficiency-tab-redesign.md` for the design rationale.
