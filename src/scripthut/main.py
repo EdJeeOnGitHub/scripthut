@@ -1202,37 +1202,22 @@ def _overview_context(request: Request) -> dict[str, Any]:
 @app.get("/efficiency", response_class=HTMLResponse)
 async def efficiency_page(request: Request, start: str = "", end: str = "",
                           backend: str = "", project: str = "", workflow: str = "",
-                          sort: str = "allocated_hours") -> HTMLResponse:
-    from scripthut.reports.efficiency import report
+                          sort: str = "attention", period: str = "week", offset: int = 0) -> HTMLResponse:
+    from scripthut.reports.dashboard import dashboard, PERIODS, SORTS
     from scripthut.reports.resources import ResourceUsage
-    today = datetime.now(UTC).date()
-    start = start or (today - timedelta(days=29)).isoformat()
-    end = end or today.isoformat()
-    error = None
-    rows = []
+    context = dict(request=request, error=None, resources=ResourceUsage.from_dict)
+    status = 200
     try:
-        beginning = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC)
-        ending = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
-        if ending <= beginning:
-            raise ValueError("End date must be on or after start date")
-        if state.run_storage:
-            store = state.run_storage.efficiency_store
-            runs = list(state.run_manager.runs.values()) if state.run_manager else []
-            await asyncio.to_thread(store.record_runs, runs)
-            rows = await asyncio.to_thread(store.records, beginning, ending,
-                backend=backend, project=project, workflow=workflow)
-    except ValueError as exc:
-        error = str(exc)
-    except Exception:
-        logger.exception("Efficiency report unavailable")
-        error = "Efficiency history is temporarily unavailable."
-    return templates.TemplateResponse("efficiency.html", {
-        "request": request, "report": report(rows, sort, state.config.settings.efficiency if state.config else None), "error": error,
-        "efficiency_policy": state.config.settings.efficiency if state.config else None,
-        "filters": dict(start=start, end=end, backend=backend, project=project, workflow=workflow, sort=sort),
-        "resources": ResourceUsage.from_dict,
-        "live_run_ids": set(state.run_manager.runs) if state.run_manager else set(),
-    }, status_code=400 if error and not rows else 200)
+        context.update(await asyncio.to_thread(dashboard, state, start=start, end=end,
+            backend=backend, project=project, workflow=workflow, sort=sort, period=period, offset=offset))
+    except Exception as exc:
+        status = 400 if isinstance(exc, ValueError) else 503
+        if status == 503:
+            logger.exception("Efficiency report unavailable")
+        context.update(error=str(exc) if status == 400 else "Efficiency history is temporarily unavailable. Please retry.",
+            filters=dict(start=start,end=end,backend=backend,project=project,workflow=workflow,sort=sort,period=period),
+            periods=PERIODS, sorts=SORTS, choices=dict(project=[project] if project else [],backend=[backend] if backend else [],workflow=[workflow] if workflow else []))
+    return templates.TemplateResponse("efficiency.html", context, status_code=status)
 
 
 @app.get("/", response_class=HTMLResponse)
