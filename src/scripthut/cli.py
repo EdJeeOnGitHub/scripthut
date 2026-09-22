@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,12 @@ from scripthut.config_schema import (
     SlurmBackendConfig,
     Stack,
 )
-from scripthut.runs.models import Run, RunItemStatus, RunStatus
+from scripthut.runs.models import (
+    STUCK_SUBMISSION_THRESHOLD_SECONDS,
+    Run,
+    RunItemStatus,
+    RunStatus,
+)
 from scripthut.runtime import Runtime, init_runtime, shutdown_runtime
 from scripthut.ssh.factory import create_ssh_client
 from scripthut.ssh.transport import ExecutionClient
@@ -61,6 +67,33 @@ TERMINAL_RUN_STATES = {
     RunStatus.FAILED.value,
     RunStatus.CANCELLED.value,
 }
+
+
+def _format_stuck_duration(seconds: float) -> str:
+    """Render an elapsed duration like the web dashboard's "6d 22h" / "9d 8h".
+
+    Distinct from ``_format_age`` below, which formats a point-in-time
+    timestamp ("3h ago") for backend/stack listings — this formats a
+    span (seconds unresolved), matching the run dashboard's own style.
+    """
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{max(minutes, 1)}m"
+
+
+def _unresolved_age_seconds(unresolved_since: str | None) -> float | None:
+    if not unresolved_since:
+        return None
+    dt = datetime.fromisoformat(unresolved_since)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +157,12 @@ def _format_run_table(runs: list[dict[str, Any]]) -> str:
     ]
     for r in runs:
         progress = f"{r['completed_count']}/{r['task_count']}"
+        status = r["status"]
+        age = _unresolved_age_seconds(r.get("unresolved_since"))
+        if age is not None and age >= STUCK_SUBMISSION_THRESHOLD_SECONDS:
+            status = f"stuck({_format_stuck_duration(age)})"
         lines.append(
-            f"{r['id']:<10} {r['status']:<10} {progress:<10} "
+            f"{r['id']:<10} {status:<10} {progress:<10} "
             f"{r['workflow_name'][:28]:<28} {r['backend_name'][:14]:<14} "
             f"{r['created_at']}"
         )
@@ -144,6 +181,15 @@ def _format_run_view(detail: dict[str, Any]) -> str:
     if counts:
         parts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         lines.append(f"  by state: {parts}")
+    age = _unresolved_age_seconds(detail.get("unresolved_since"))
+    if age is not None and age >= STUCK_SUBMISSION_THRESHOLD_SECONDS:
+        lines.append(
+            f"  STUCK:    submission unresolved for {_format_stuck_duration(age)} — "
+            "this is not a transient blip. Resolve it: "
+            "`scripthut run resolve <id> <task> --action retry "
+            "--confirm-not-submitted` (or --action bind --job-id <id> "
+            "if it did start), then `scripthut run cancel <id>`."
+        )
     if detail.get("commit_hash"):
         lines.append(f"  commit:   {detail['commit_hash']}")
     items = detail.get("items", [])
@@ -4031,7 +4077,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_resolve = run_sub.add_parser("resolve", help="Resolve an unknown Slurm submission")
     p_resolve.add_argument("id")
     p_resolve.add_argument("task")
-    p_resolve.add_argument("--attempt", required=True, help="Attempt ID from run view")
+    p_resolve.add_argument(
+        "--attempt", default=None,
+        help=(
+            "Attempt ID to guard against (from run view). Optional — "
+            "omit to act on the task's current attempt."
+        ),
+    )
     p_resolve.add_argument("--action", choices=["check", "bind", "retry"], default="check")
     p_resolve.add_argument("--job-id")
     p_resolve.add_argument("--confirm-not-submitted", action="store_true")

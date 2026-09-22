@@ -14,6 +14,7 @@ from scripthut.runs.manager import RunManager
 from scripthut.runs.models import Run, RunItem, TaskDefinition
 from scripthut.runs.models import RunItemStatus as Status
 from scripthut.runs.storage import RunStorageManager
+from scripthut.runs.submission import SubmissionManager
 from scripthut.ssh.transport import TransportError
 from scripthut.submission import SubmissionConflict
 
@@ -31,6 +32,11 @@ def setup(tmp_path):
     )
     manager = RunManager(config, {"b": ssh}, RunStorageManager(tmp_path), {"b": backend})
     manager._resolve_environment = lambda run, task: ({}, "")
+    # Tests below assert exact "one sbatch call" / immediate-verdict
+    # behavior — the retry-with-backoff on an empty scheduler match
+    # (added to absorb real accounting lag) is exercised on its own in
+    # test_find_attempt_backoff_recovers_late_match, with real delays.
+    manager.submissions._FIND_ATTEMPT_RETRY_DELAYS = ()
     run = Run(
         "run",
         "workflow",
@@ -221,6 +227,42 @@ async def test_bind_rejects_wrong_id_or_destination(setup):
     ssh.host = "cluster"
     await manager.submissions.resolve(run, item, job_id="42", **kwargs)
     assert item.status == Status.SUBMITTED
+
+
+def test_unresolved_since_and_is_stuck():
+    """Run.unresolved_since/is_stuck are what the CLI's `run list`/`run
+    view` and the web dashboard both key off to flag a run distinctly
+    from ordinary "running" — get this wrong and either surface can
+    silently disagree or never flag anything at all."""
+    from datetime import timedelta
+
+    from scripthut.runs.models import STUCK_SUBMISSION_THRESHOLD_SECONDS
+    from scripthut.submission import SubmissionAttempt
+
+    item = RunItem(TaskDefinition(id="t", name="t", command="true"))
+    run = Run("r", "wf", "b", datetime.now(UTC), [item], 4)
+    assert run.unresolved_since is None
+    assert run.is_stuck is False
+
+    old = datetime.now(UTC) - timedelta(seconds=STUCK_SUBMISSION_THRESHOLD_SECONDS + 60)
+    item.status = Status.SUBMISSION_UNKNOWN
+    item.submission_attempts.append(
+        SubmissionAttempt(id="a1", created_at=old, scheduler_name="x", destination="d", user="u")
+    )
+    assert run.unresolved_since == old
+    assert run.is_stuck is True
+
+    # A submission that's only just gone unresolved isn't "stuck" yet —
+    # that's the whole point of the threshold (don't cry wolf on a
+    # normal in-flight blip the reconciler is about to clear).
+    item.submission_attempts[0].created_at = datetime.now(UTC) - timedelta(seconds=30)
+    assert run.unresolved_since is not None
+    assert run.is_stuck is False
+
+    # Once resolved, neither property sees the (now historical) attempt.
+    item.status = Status.PENDING
+    assert run.unresolved_since is None
+    assert run.is_stuck is False
 
 
 def test_legacy_item_loads_without_attempt_history():
@@ -463,6 +505,77 @@ async def test_retry_rejects_positive_scheduler_evidence(setup):
             confirm_not_submitted=True,
         )
     assert item.status == Status.SUBMISSION_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_find_attempt_backoff_recovers_late_match(setup, monkeypatch):
+    """A job that finishes faster than squeue/sacct catch up must not be
+    declared unknown on the first empty query — that race is the actual
+    root cause behind most SUBMISSION_UNKNOWN runs in practice."""
+    manager, run, ssh, _ = setup
+    manager.submissions._FIND_ATTEMPT_RETRY_DELAYS = (0, 0)
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("scripthut.runs.submission.asyncio.sleep", fake_sleep)
+
+    queries = 0
+
+    async def command(cmd, **kwargs):
+        nonlocal queries
+        if cmd.startswith("sbatch"):
+            return "Submitted batch job 42\n", "", 0
+        if cmd.startswith(("squeue --local", "TZ=UTC sacct --local")):
+            queries += 1
+            # Rounds 1-2 (4 queries: squeue+sacct twice) come back empty;
+            # round 3 is the first to see the job.
+            if queries <= 4:
+                return "", "", 0
+            attempt = run.items[0].submission_attempts[-1]
+            return f"42|{attempt.scheduler_name}|alice\n", "", 0
+        return "", "", 0
+
+    ssh.run_command.side_effect = command
+    await manager.process_run(run)
+    assert run.items[0].status == Status.SUBMITTED
+    assert run.items[0].job_id == "42"
+    assert sleeps == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_resubmission_gives_up_after_max_attempts(setup):
+    """A persistently broken submission (bad partition, dead login node)
+    must not resubmit forever just because each unknown got resolved —
+    that loop is exactly what made these runs hard to clean up by hand."""
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    item = run.items[0]
+    for _ in range(SubmissionManager.MAX_SUBMISSION_ATTEMPTS):
+        await manager.process_run(run)
+        assert item.status == Status.SUBMISSION_UNKNOWN
+        await manager.submissions.resolve(run, item, action="retry", confirm_not_submitted=True)
+        assert item.status == Status.PENDING
+    await manager.process_run(run)
+    assert item.status == Status.FAILED
+    assert len(item.submission_attempts) == SubmissionManager.MAX_SUBMISSION_ATTEMPTS
+    assert "Giving up after" in (item.error or "")
+
+
+@pytest.mark.asyncio
+async def test_resolve_without_attempt_id_uses_latest(setup):
+    """attempt_id is an internal identity check, not something a caller
+    should have to fetch first — a bare resolve acts on the current
+    attempt."""
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    item = run.items[0]
+    assert item.status == Status.SUBMISSION_UNKNOWN
+    result = await manager.submissions.resolve(run, item, action="retry", confirm_not_submitted=True)
+    assert result["status"] == Status.PENDING.value
+    assert item.status == Status.PENDING
 
 
 @pytest.mark.asyncio

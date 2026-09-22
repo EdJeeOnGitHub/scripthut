@@ -40,6 +40,15 @@ class TaskOutput:
         )
 
 
+# A run whose submission has been unresolved for less than this is just a
+# normal in-flight blip (a dropped SSH connection the reconciler is about
+# to clear on its own via Run.unresolved_since). Past this, RunStatus.RUNNING
+# is the wrong word for it — every surface (CLI, web dashboard) that shows
+# run status flags it distinctly instead, using this one threshold so they
+# can't silently disagree on when a run counts as stuck.
+STUCK_SUBMISSION_THRESHOLD_SECONDS = 15 * 60
+
+
 class RunItemStatus(str, Enum):
     """Status of a run item.
 
@@ -559,6 +568,40 @@ class Run:
     @property
     def submission_unresolved(self) -> bool:
         return any(item.submission_unresolved for item in self.items)
+
+    @property
+    def unresolved_since(self) -> datetime | None:
+        """Earliest submission attempt still awaiting resolution, or None.
+
+        A run can sit at RunStatus.RUNNING indefinitely while an item is
+        SUBMISSION_UNKNOWN — that status is not "progressing," it is
+        "waiting for a human or a backend that never confirmed." Callers
+        (CLI, API) use this single, server-computed timestamp to flag a
+        run as stuck rather than each re-deriving "unresolved for how
+        long" from created_at, which is wrong once a run has been
+        resolved and resubmitted more than once.
+        """
+        timestamps = [
+            item.submission_attempts[0].created_at
+            for item in self.items
+            if item.submission_unresolved and item.submission_attempts
+        ]
+        return min(timestamps) if timestamps else None
+
+    @property
+    def is_stuck(self) -> bool:
+        """True once ``unresolved_since`` is past the "not a transient
+        blip" threshold. A model property (like ``status_class`` below)
+        rather than a template helper, so every renderer — CLI, web
+        templates, any future consumer — gets the same answer for free
+        without each having to be wired up to compute it.
+        """
+        since = self.unresolved_since
+        if since is None:
+            return False
+        return (
+            datetime.now(timezone.utc) - since
+        ).total_seconds() >= STUCK_SUBMISSION_THRESHOLD_SECONDS
 
     @property
     def status(self) -> RunStatus:

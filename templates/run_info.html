@@ -1,4 +1,4 @@
-{% from '_status.html' import status_dot, status_bar %}
+{% from '_status.html' import status_dot, status_bar, status_pill %}
 {% if run %}
 {% if run.artifact_refs %}
 <section class="rounded border bg-white p-4 mb-4" aria-label="Research artifacts">
@@ -17,16 +17,10 @@
 <div class="grid grid-cols-2 md:grid-cols-5 {% if cost_summary is defined and cost_summary and cost_summary.costed_tasks > 0 %}lg:grid-cols-6{% endif %} gap-4">
     <div>
         <p class="text-sm text-gray-500">Status</p>
-        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full
-            {% if run.status.value == 'running' %}bg-indigo-100 text-indigo-700
-            {% elif run.status.value == 'pending' %}bg-gray-100 text-gray-600
-            {% elif run.status.value == 'completed' %}bg-green-100 text-green-700
-            {% elif run.status.value == 'failed' %}bg-red-100 text-red-700
-            {% elif run.status.value == 'cancelled' %}bg-gray-100 text-gray-600
-            {% else %}bg-gray-100 text-gray-600{% endif %}">
-            {{ status_dot(run.status.value) }}
-            {{ run.status.value }}
-        </span>
+        {{ status_pill(run, size='px-2.5 py-1') }}
+        {% if run.is_stuck %}
+        <p class="text-xs text-orange-600 mt-1">Unresolved since {{ run.unresolved_since | age }} — see the task row below to check, bind, or retry it.</p>
+        {% endif %}
     </div>
     <div>
         <p class="text-sm text-gray-500">Progress</p>

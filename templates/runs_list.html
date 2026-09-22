@@ -1,4 +1,4 @@
-{% from '_status.html' import status_dot, status_bar %}
+{% from '_status.html' import status_dot, status_bar, status_pill %}
 {#
   ``deleted_count`` / ``skipped_count`` are only set when this partial is
   rendered as the response to a bulk delete; the SSE stream re-renders it
@@ -71,16 +71,7 @@
                     {% endif %}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm">
-                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full
-                        {% if run.status.value == 'running' %}bg-indigo-100 text-indigo-700
-                        {% elif run.status.value == 'pending' %}bg-gray-100 text-gray-600
-                        {% elif run.status.value == 'completed' %}bg-green-100 text-green-700
-                        {% elif run.status.value == 'failed' %}bg-red-100 text-red-700
-                        {% elif run.status.value == 'cancelled' %}bg-gray-100 text-gray-600
-                        {% else %}bg-gray-100 text-gray-600{% endif %}">
-                        {{ status_dot(run.status.value) }}
-                        {{ run.status.value }}
-                    </span>
+                    {{ status_pill(run, size='px-2.5 py-1') }}
                 </td>
                 <td class="px-6 py-4 whitespace-nowrap flex items-center gap-3">
                     <a href="{{ request.scope.get('root_path', '') }}/runs/{{ run.id }}" class="text-blue-600 hover:text-blue-800 text-sm">
@@ -124,16 +115,7 @@
         <!-- Row 1: Workflow name + Status badge -->
         <div class="flex items-start justify-between gap-2">
             <span class="text-sm font-medium text-gray-900 truncate">{{ run.workflow_name }}</span>
-            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0
-                {% if run.status.value == 'running' %}bg-indigo-100 text-indigo-700
-                {% elif run.status.value == 'pending' %}bg-gray-100 text-gray-600
-                {% elif run.status.value == 'completed' %}bg-green-100 text-green-700
-                {% elif run.status.value == 'failed' %}bg-red-100 text-red-700
-                {% elif run.status.value == 'cancelled' %}bg-gray-100 text-gray-600
-                {% else %}bg-gray-100 text-gray-600{% endif %}">
-                {{ status_dot(run.status.value) }}
-                {{ run.status.value }}
-            </span>
+            {{ status_pill(run) }}
         </div>
         <!-- Row 2: ID, backend, created -->
         <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-500">

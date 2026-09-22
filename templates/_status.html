@@ -56,6 +56,38 @@
 {%- endmacro %}
 
 {#
+  status_pill(run, size): the colored rounded badge for a *run's*
+  overall status (RunStatus, not an item's RunItemStatus) — used by the
+  dashboard cards and both runs-list layouts. Centralised for the same
+  reason as status_dot: without it, three templates each grow their own
+  copy of the status->color mapping and drift.
+
+  Overrides to a distinct "stuck" badge when run.is_stuck is true —
+  RunStatus.RUNNING alone can't tell a healthy run from one that's been
+  sitting on an unresolved submission for days (see
+  STUCK_SUBMISSION_THRESHOLD_SECONDS), and that distinction is the
+  entire point of showing a badge at all.
+#}
+{% macro status_pill(run, size='px-2 py-0.5') -%}
+{%- if run.is_stuck -%}
+<span class="inline-flex items-center gap-1.5 {{ size }} text-xs font-medium rounded-full flex-shrink-0 bg-orange-100 text-orange-700"
+    title="Submission unresolved since {{ run.unresolved_since | age }} — run `scripthut run resolve` or see the run page">
+    <span class="text-orange-600 font-bold">?</span> stuck
+</span>
+{%- else -%}
+<span class="inline-flex items-center gap-1.5 {{ size }} text-xs font-medium rounded-full flex-shrink-0
+    {%- if run.status.value == 'running' %} bg-indigo-100 text-indigo-700
+    {%- elif run.status.value == 'pending' %} bg-gray-100 text-gray-600
+    {%- elif run.status.value == 'completed' %} bg-green-100 text-green-700
+    {%- elif run.status.value == 'failed' %} bg-red-100 text-red-700
+    {%- elif run.status.value == 'cancelled' %} bg-gray-100 text-gray-600
+    {%- else %} bg-gray-100 text-gray-600{% endif %}">
+    {{ status_dot(run.status.value) }} {{ run.status.value }}
+</span>
+{%- endif -%}
+{%- endmacro %}
+
+{#
   status_bar(counts, classes): stacked run progress bar with one segment
   per item state, sized by its share of the item count. Colors mirror
   status_dot. Pass run.status_counts and the sizing classes for the

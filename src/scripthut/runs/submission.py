@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 
 
 class SubmissionManager:
+    # Retry delays (seconds) for a scheduler-match query that comes back
+    # empty. A job that both queues AND finishes faster than this round
+    # trip can vanish from squeue before sacct's accounting has caught
+    # up, so a single-shot "0 matches" is evidence of "not observed
+    # yet," not "never happened." Backing off here is what actually
+    # removes most SUBMISSION_UNKNOWN verdicts rather than just making
+    # them easier to clean up after the fact.
+    _FIND_ATTEMPT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
+
+    # Cap on how many times a single task will be (re)submitted through
+    # this path. Each SUBMISSION_UNKNOWN → resolve(retry) → resubmit
+    # cycle is a fresh sbatch call; without a cap, a persistently broken
+    # config (bad partition, expired allocation) resubmits forever every
+    # time someone — or the reconciler — clears the unknown state.
+    MAX_SUBMISSION_ATTEMPTS = 3
+
     def __init__(self, manager: RunManager):
         self.manager = manager
         self.locks: dict[str, asyncio.Lock] = {}
@@ -95,6 +111,23 @@ class SubmissionManager:
                 raise
             return None
 
+    async def _find_attempt_with_backoff(
+        self, backend: SlurmBackend, attempt: SubmissionAttempt
+    ) -> set[str]:
+        """Look up an attempt's scheduler match, retrying briefly on a miss.
+
+        Only empty results are retried — a query that raises (transport
+        failure) or that finds multiple matches is a different, more
+        urgent problem and is left to the caller immediately.
+        """
+        matches = await backend.find_attempt(attempt)
+        for delay in self._FIND_ATTEMPT_RETRY_DELAYS:
+            if matches:
+                break
+            await asyncio.sleep(delay)
+            matches = await backend.find_attempt(attempt)
+        return matches
+
     async def check(
         self, run: Run, item: RunItem, backend: SlurmBackend, job_id: str | None = None
     ) -> None:
@@ -108,7 +141,7 @@ class SubmissionManager:
             raise SubmissionConflict(
                 "Submission destination or user changed; restore its original configuration"
             )
-        matches = await backend.find_attempt(attempt)
+        matches = await self._find_attempt_with_backoff(backend, attempt)
         if len(matches) != 1:
             raise SubmissionConflict(
                 f"Found {len(matches)} matching jobs; submission remains unknown"
@@ -136,7 +169,7 @@ class SubmissionManager:
         run: Run,
         item: RunItem,
         *,
-        attempt_id: str,
+        attempt_id: str | None = None,
         action: str = "check",
         job_id: str | None = None,
         confirm_not_submitted: bool = False,
@@ -145,7 +178,13 @@ class SubmissionManager:
             if not item.submission_unresolved or not item.submission_attempts:
                 raise SubmissionConflict("Task has no unresolved submission")
             attempt = item.submission_attempts[-1]
-            if attempt.id != attempt_id:
+            # attempt_id is an internal identity check, not something a
+            # caller should have to fetch first: a bare "resolve this
+            # task's submission" always means the latest attempt. It's
+            # only required when a caller explicitly wants to guard
+            # against acting on an attempt that changed underneath it
+            # (e.g. a UI that fetched run view a while ago).
+            if attempt_id is not None and attempt.id != attempt_id:
                 raise SubmissionConflict("Submission attempt changed; refresh before resolving")
             backend = self.manager.get_job_backend(run.backend_name)
             if not isinstance(backend, SlurmBackend):
@@ -161,7 +200,7 @@ class SubmissionManager:
                 matches: set[str] = set()
                 if self.manager.available(run.backend_name):
                     try:
-                        matches = await backend.find_attempt(attempt)
+                        matches = await self._find_attempt_with_backoff(backend, attempt)
                     except Exception:
                         pass
                 if matches:

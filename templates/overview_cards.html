@@ -1,4 +1,4 @@
-{% from '_status.html' import status_dot, status_bar %}
+{% from '_status.html' import status_dot, status_bar, status_pill %}
 {#
   Landing-page body, in order: activity, backends, current runs, recent
   runs. Rendered standalone by /overview/stream, so it must not depend on
@@ -185,10 +185,12 @@
   work without needing to read the status pill.
 #}
 {% macro run_card(run) %}
+        {% set stuck = run.is_stuck %}
         {% set is_active = run.status.value in ('running', 'pending') %}
         <a href="/runs/{{ run.id }}"
             class="block bg-white rounded-lg shadow-md hover:shadow-lg transition-shadow p-4 border-l-4
-            {% if run.status.value == 'running' %}border-indigo-500
+            {% if stuck %}border-orange-500
+            {% elif run.status.value == 'running' %}border-indigo-500
             {% elif run.status.value == 'pending' %}border-gray-300
             {% elif run.status.value == 'completed' %}border-green-500
             {% elif run.status.value == 'failed' %}border-red-500
@@ -206,15 +208,7 @@
                 {% else %}
                 <span class="text-xs text-gray-400 italic">no source</span>
                 {% endif %}
-                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0
-                    {% if run.status.value == 'running' %}bg-indigo-100 text-indigo-700
-                    {% elif run.status.value == 'pending' %}bg-gray-100 text-gray-600
-                    {% elif run.status.value == 'completed' %}bg-green-100 text-green-700
-                    {% elif run.status.value == 'failed' %}bg-red-100 text-red-700
-                    {% else %}bg-gray-100 text-gray-600{% endif %}">
-                    {{ status_dot(run.status.value) }}
-                    {{ run.status.value }}
-                </span>
+                {{ status_pill(run) }}
             </div>
 
             <!-- Workflow -->
@@ -243,6 +237,10 @@
                 {% if c.get('pending', 0) %}
                 <span class="inline-flex items-center gap-1">{{ status_dot('pending') }}{{ c.get('pending') }} waiting</span>
                 {% endif %}
+                {% set unresolved = c.get('submission_unknown', 0) + c.get('submitting', 0) %}
+                {% if unresolved %}
+                <span class="inline-flex items-center gap-1 text-orange-600">{{ status_dot('submission_unknown') }}{{ unresolved }} unresolved</span>
+                {% endif %}
                 {% if c.get('failed', 0) or c.get('dep_failed', 0) %}
                 <span class="inline-flex items-center gap-1 text-red-600">{{ status_dot('failed') }}{{ c.get('failed', 0) + c.get('dep_failed', 0) }} failed</span>
                 {% endif %}
@@ -258,6 +256,12 @@
                 <span title="{% if is_active %}Running for{% else %}Started{% endif %} this long">
                     <time class="local-elapsed" datetime="{{ run.created_at.isoformat() }}"></time>{% if not is_active %} ago{% endif %}
                 </span>
+                {% if stuck %}
+                <span class="text-gray-300">·</span>
+                <span class="text-orange-600" title="How long the submission has been unresolved">
+                    unresolved <time class="local-elapsed" datetime="{{ run.unresolved_since.isoformat() }}"></time>
+                </span>
+                {% endif %}
                 {% if run.total_cpu_hours > 0 %}
                 <span class="text-gray-300">·</span>
                 <span class="font-mono" title="CPU hours consumed">

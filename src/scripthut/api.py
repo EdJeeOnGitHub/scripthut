@@ -75,6 +75,9 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "completed_count": completed,
         "submitted_count": submitted_count,
         "status_counts": counts,
+        "unresolved_since": (
+            run.unresolved_since.isoformat() if run.unresolved_since else None
+        ),
     }
 
 
@@ -91,7 +94,10 @@ class AdhocSubmissionRequest(BaseModel):
 
 
 class SubmissionResolutionRequest(BaseModel):
-    attempt_id: str
+    # Optional: omit to act on the task's current (latest) attempt.
+    # Pass it only to guard against acting on an attempt that changed
+    # underneath a caller holding a stale run view.
+    attempt_id: str | None = None
     action: str = "check"
     job_id: str | None = None
     confirm_not_submitted: bool = False

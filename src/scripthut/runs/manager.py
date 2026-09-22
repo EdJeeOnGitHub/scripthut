@@ -2054,6 +2054,25 @@ class RunManager:
             return True
 
         if isinstance(job_backend, SlurmBackend):
+            # A resolve(retry) sends an unresolved item back to PENDING so
+            # it can be resubmitted — but if the underlying cause is
+            # persistent (bad partition, expired allocation, permanently
+            # unreachable login node), that resubmission fails the same
+            # way every time, and each retry only feeds a new attempt
+            # into the same loop. Stop after a few and fail loudly with a
+            # concrete pointer, instead of quietly resubmitting forever.
+            if len(item.submission_attempts) >= SubmissionManager.MAX_SUBMISSION_ATTEMPTS:
+                item.status = RunItemStatus.FAILED
+                item.error = (
+                    f"Giving up after {len(item.submission_attempts)} submission "
+                    "attempts, each unresolved or rejected — this is not a transient "
+                    "blip. Check the task's partition/account/resources against the "
+                    "backend, or bind a known job ID with `scripthut run resolve "
+                    "--action bind --job-id <id>` if the job did actually start."
+                )
+                item.finished_at = datetime.now(timezone.utc)
+                self._persist_run(run)
+                return False
             return await self.submissions.submit(run, item, script, job_backend)
 
         try:
