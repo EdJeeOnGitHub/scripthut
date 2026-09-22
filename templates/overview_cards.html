@@ -1,3 +1,5 @@
+{% for alert in allocation_alerts | default([]) %}<p class="text-sm text-amber-700 mb-2">{{ alert }}</p>{% endfor %}
+{% from '_allocation.html' import allocation_section, allocation_links %}
 {% from '_status.html' import status_dot, status_bar, status_pill %}
 {#
   Landing-page body, in order: activity, backends, current runs, recent
@@ -105,7 +107,7 @@
 </div>
 
 {#
-  Today's shape, beside the year. Stacked by source so a spike is
+  Today's shape, beside the year. Stacked by project so a spike is
   attributable; colours are slots 1-5 of the validated categorical palette
   plus a neutral for the "Other" rollup, assigned busiest-source-first so a
   source keeps its colour as the mix changes. Three of those hues sit under
@@ -118,7 +120,7 @@
             Last {{ hourly.window_hours }} hours
         </h2>
         <span class="text-xs text-gray-400" title="Hours are the server's local time">
-            CPU-hours by source · local time
+            CPU-hours by project · local time
         </span>
     </div>
 
@@ -139,7 +141,7 @@
         <!-- Bars. Each column is one local hour; segments stack from the
              baseline with a 2px surface gap, rounded only at the free end. -->
         <div class="flex items-end gap-[2px] h-32" role="img"
-            aria-label="CPU-hours per hour over the last {{ hourly.window_hours }} hours, by source">
+            aria-label="CPU-hours per hour over the last {{ hourly.window_hours }} hours, by project">
             {% for hour in hourly.hours %}
             <div class="flex-1 h-full flex flex-col-reverse gap-[2px] justify-start min-w-0"
                 title="{{ hour.label }} — {% if hour.segments %}{{ '%.1f'|format(hour.total_cpu_hours) }} CPU-h{% for seg in hour.segments %} · {{ seg.source }} {{ '%.1f'|format(seg.cpu_hours) }}{% endfor %}{% else %}idle{% endif %}">
@@ -197,16 +199,17 @@
             {% else %}border-gray-300{% endif %}
             {% if not is_active %}opacity-75 hover:opacity-100{% endif %}">
 
-            <!-- Source chip + status -->
+            <!-- Project chip + status -->
+            {% set project = project_name(run) %}
             <div class="flex items-center justify-between gap-2 mb-1">
-                {% if run.source_name %}
+                {% if project %}
                 <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium truncate"
-                    title="Source: {{ run.source_name }}">
+                    title="Project: {{ project }}">
                     <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path></svg>
-                    {{ run.source_name }}
+                    {{ project }}
                 </span>
                 {% else %}
-                <span class="text-xs text-gray-400 italic">no source</span>
+                <span class="text-xs text-gray-400 italic">Unattributed</span>
                 {% endif %}
                 {{ status_pill(run) }}
             </div>
@@ -319,29 +322,50 @@
                 </div>
                 <div>
                     <div class="text-xl font-semibold text-gray-700 font-mono">
-                        {{ u.get('jobs', 0) }}{% if q and q.jobs_max %}<span class="text-sm text-gray-400">/{{ q.jobs_max }}</span>{% endif %}
+                        {{ u.get('jobs', 0) }}
                     </div>
                     <div class="text-xs text-gray-500">My jobs</div>
                 </div>
             </div>
 
+
             <!-- Cluster + disk meters -->
             <div class="mt-4 space-y-2">
-                {% if backend.status.cpus_total %}
-                {% set cpus_busy = backend.status.cpus_total - backend.status.cpus_idle %}
-                {% set cluster_pct = (cpus_busy * 100 / backend.status.cpus_total) | round(0, 'floor') | int %}
-                <div>
-                    <div class="flex items-baseline justify-between text-xs mb-0.5">
-                        <span class="text-gray-500">Cluster</span>
+                {% set ci = backend.status.cluster_info %}
+                {% if ci %}
+                <div class="text-xs text-gray-500" title="Partitions may share nodes. Counts are shown separately, never added together. These are scheduler allocations, not measured CPU activity or account quotas.">
+                    Cluster capacity
+                </div>
+                {% set overview_partitions = ci.overview_partitions %}
+                {% for p in overview_partitions[:3] %}
+                {% if p.cpus_total %}
+                {% set allocated_pct = (p.cpus_allocated * 100 / p.cpus_total) | round(0, 'floor') | int %}
+                {% set unavailable_pct = (p.cpus_other * 100 / p.cpus_total) | round(0, 'floor') | int %}
+                <div tabindex="0" class="focus:outline-blue-600 rounded" title="{{ p.name }}: {{ allocated_pct }}% allocated; {{ p.cpus_idle }} CPUs idle; {{ p.cpus_other }} unavailable. These are scheduler allocations, not measured CPU activity." aria-label="{{ p.name }}: {{ allocated_pct }}% allocated; {{ p.cpus_idle }} CPUs idle; {{ p.cpus_other }} unavailable">
+                    <div class="flex flex-wrap items-baseline justify-between gap-x-2 text-xs mb-0.5">
+                        <span class="text-gray-500">{{ p.name }}{% if p.state != 'up' %} ({{ p.state }}){% endif %}</span>
                         <span class="text-gray-600 font-mono">
-                            {{ cluster_pct }}% busy · <span class="font-medium">{{ backend.status.cpus_idle }}</span> CPUs free
+                            {{ allocated_pct }}% allocated
                         </span>
                     </div>
-                    <div class="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div class="h-full {% if cluster_pct >= 95 %}bg-red-500{% elif cluster_pct >= 80 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
-                            style="width: {{ cluster_pct }}%"></div>
+                    <div class="flex w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div class="h-full {% if allocated_pct >= 95 %}bg-red-500{% elif allocated_pct >= 80 %}bg-yellow-500{% else %}bg-green-500{% endif %}"
+                            style="width: {{ allocated_pct }}%"></div>
+                        <div class="h-full bg-gray-400" title="Unavailable CPUs"
+                            style="width: {{ unavailable_pct }}%"></div>
                     </div>
                 </div>
+                {% else %}
+                <div class="flex justify-between text-xs text-gray-500"><span>{{ p.name }}</span><span>Capacity unavailable</span></div>
+                {% endif %}
+                {% else %}
+                <div class="text-xs text-gray-500">Partition availability not reported.</div>
+                {% endfor %}
+                {% if overview_partitions | length > 3 %}
+                <a href="/backends" class="block text-xs text-blue-600 hover:text-blue-800">All partitions · {{ overview_partitions | length }} →</a>
+                {% endif %}
+                {% else %}
+                <p class="text-xs text-gray-500">Capacity unavailable</p>
                 {% endif %}
 
                 {% if backend.status.disk_total_bytes and backend.status.disk_avail_bytes is not none %}
@@ -349,8 +373,8 @@
                 <div>
                     <div class="flex items-baseline justify-between text-xs mb-0.5">
                         <span class="text-gray-500">Disk</span>
-                        <span class="text-gray-600 font-mono" title="At {{ backend.status.disk_clone_dir }}">
-                            {{ disk_pct }}% used · <span class="font-medium">{{ backend.status.disk_avail_bytes | disk_bytes }}</span> free
+                        <span class="text-gray-600 font-mono" title="{{ disk_pct }}% used · At {{ backend.status.disk_clone_dir }}">
+                            {{ backend.status.disk_avail_bytes | disk_bytes }} free
                         </span>
                     </div>
                     <div class="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
@@ -361,20 +385,30 @@
                 {% endif %}
             </div>
 
-            <!-- Fair-share / account, when Slurm reports them -->
-            {% if q and (q.fair_share is not none or q.account) %}
-            <div class="mt-3 pt-2 border-t border-gray-100 flex flex-wrap items-center gap-x-3 text-xs text-gray-500">
-                {% if q.fair_share is not none %}
-                <span title="Slurm fair-share priority weight (0.0-1.0, higher = better)">
-                    fair-share
-                    <span class="font-mono font-medium {% if q.fair_share < 0.3 %}text-red-600{% elif q.fair_share < 0.5 %}text-yellow-700{% else %}text-green-700{% endif %}">{{ '%.2f'|format(q.fair_share) }}</span>
-                </span>
-                {% endif %}
-                {% if q.account %}
-                <span>account <span class="font-mono text-gray-600">{{ q.account }}</span></span>
+            <div class="mt-3 pt-2 border-t border-gray-100 text-xs">
+                {{ allocation_links((allocation_reports | default({})).get(name, [])) }}
+                {% if ci or q or backend.status.disk_total_bytes %}
+                <details data-report-detail="backend-{{ name }}" class="mt-1 text-gray-500">
+                    <summary class="cursor-pointer hover:text-gray-700">Capacity details</summary>
+                    <div class="mt-2 space-y-1">
+                    {% if ci %}
+                    {% for p in ci.overview_partitions[:3] %}
+                    <p>{{ p.name }}: {{ p.cpus_idle }} CPUs idle · {{ p.cpus_other }} unavailable · {{ p.cpus_total }} total</p>
+                    {% endfor %}
+                    <p>Partitions can share nodes. Idle CPUs may be spread across nodes; availability does not guarantee a job can start.</p>
+                    {% endif %}
+                    {% if backend.status.disk_total_bytes and backend.status.disk_avail_bytes is not none %}
+                    <p>Disk: {{ disk_pct }}% used · {{ backend.status.disk_avail_bytes | disk_bytes }} free at {{ backend.status.disk_clone_dir }}</p>
+                    {% endif %}
+                    {% if q %}
+                    {% if q.fair_share is not none %}<p>Fair-share: {{ '%.2f'|format(q.fair_share) }}</p>{% endif %}
+                    {% if q.account %}<p>Account: {{ q.account }}</p>{% endif %}
+                    {% if q.jobs_max %}<p>Job limit: {{ q.jobs_max }}</p>{% endif %}
+                    {% endif %}
+                    </div>
+                </details>
                 {% endif %}
             </div>
-            {% endif %}
             {% endif %}
         </div>
         {% endfor %}
@@ -385,6 +419,8 @@
     </div>
     {% endif %}
 </section>
+
+{{ allocation_section(allocation_reports | default({})) }}
 
 <!-- Current runs -->
 <section class="mt-8">

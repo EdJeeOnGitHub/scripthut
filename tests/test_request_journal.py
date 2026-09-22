@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="Durable journal requ
 
 PAYLOAD = {
     "backend": "test",
-    "task": {"id": "bootstrap", "name": "prepare", "command": "true"},
+    "task": {"project_id": "test-project", "id": "bootstrap", "name": "prepare", "command": "true"},
     "retain_until_archived": True,
 }
 
@@ -276,3 +276,42 @@ def test_storage_disables_journal_without_posix_support(tmp_path):
     with patch("scripthut.runs.storage.os", SimpleNamespace(name="nt")):
         assert storage.request_journal is None
     assert not (tmp_path / "_submission_requests").exists()
+
+
+@pytest.mark.asyncio
+async def test_project_requirement_rejects_before_reservation_but_preserves_legacy_retry(tmp_path):
+    legacy = dict(PAYLOAD, task={k: v for k, v in PAYLOAD['task'].items() if k != 'project_id'})
+    rm = manager(tmp_path)
+    with pytest.raises(ValueError, match='project_id'):
+        await rm.create_keyed_adhoc_run('new', legacy)
+    assert rm.request_journal.lookup('new') is None
+    rm.process_run.assert_not_awaited()
+
+    # An accepted legacy request whose run has expired must never execute again.
+    reserved = rm.request_journal.reserve('old', legacy)
+    rm.request_journal.accepted('old')
+    assert await rm.create_keyed_adhoc_run('old', legacy) is None
+    assert rm.request_journal.lookup('old')['run_id'] == reserved['run_id']
+    rm.process_run.assert_not_awaited()
+    with pytest.raises(RequestConflict):
+        await rm.create_keyed_adhoc_run('old', PAYLOAD)
+
+
+@pytest.mark.asyncio
+async def test_git_source_identity_is_assigned_before_processing_and_saved(tmp_path):
+    from scripthut.runs.models import TaskDefinition
+
+    rm = manager(tmp_path)
+    tasks = [TaskDefinition(id='default', name='default', command='true'),
+             TaskDefinition(id='explicit', name='explicit', command='true', project_id='override')]
+
+    async def verify(run):
+        assert [item.task.project_id for item in run.items] == ['actual-repo', 'override']
+
+    rm.process_run.side_effect = verify
+    await rm._build_run(tasks, 'alias/workflow', 'test', None, None,
+                        git_repo='git@example.com:team/actual-repo.git', source_name='alias')
+    rm.process_run.assert_awaited_once()
+    rm.storage.save_if_dirty(rm.runs)
+    stored = next(iter(rm.storage.load_all_runs().values()))
+    assert [item.task.project_id for item in stored.items] == ['actual-repo', 'override']

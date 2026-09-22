@@ -23,6 +23,11 @@ def allowed(method: str, path: str) -> bool:
         name = file.group(1)
         return (all(part not in {'', '.', '..'} for part in name.split('/'))
                 and '\\' not in name and not any(ord(c) < 32 or ord(c) == 127 for c in name))
+    if method == 'GET' and path in {
+        'artifact-catalog/projects', 'artifact-catalog/publications',
+        'artifact-catalog/history', 'artifact-catalog/storage',
+    }:
+        return True
     if method == 'GET' and re.fullmatch(r'artifacts(?:/sha256:[a-f0-9]{64})?', path):
         return True
     if method == 'POST' and path == 'artifact-uploads':
@@ -49,6 +54,7 @@ def make_artifact_router() -> APIRouter:
     @router.api_route('/artifact-transfers/{suffix:path}', methods=['GET'])
     @router.api_route('/artifact-imports', methods=['POST'])
     @router.api_route('/artifact-imports/{suffix:path}', methods=['GET', 'POST'])
+    @router.api_route('/artifact-catalog/{suffix:path}', methods=['GET'])
     @router.api_route('/artifacts', methods=['GET'])
     @router.api_route('/artifacts/{suffix:path}', methods=['GET', 'HEAD'])
     async def proxy(request: Request, suffix: str = '') -> StreamingResponse:
@@ -56,7 +62,16 @@ def make_artifact_router() -> APIRouter:
         root = request.scope.get('root_path', '')
         if root:
             path = request.url.path.removeprefix(root).removeprefix('/api/v1/')
-        if request.url.query or not allowed(request.method, path):
+        catalog_params = {
+            'artifact-catalog/projects': {'q', 'page', 'limit'},
+            'artifact-catalog/publications': {'project', 'kind', 'q', 'page', 'limit', 'include_partial'},
+            'artifact-catalog/history': {'group', 'page', 'limit', 'include_partial'},
+            'artifact-catalog/storage': set(),
+        }
+        query_keys = [key for key, _ in request.query_params.multi_items()]
+        valid_query = (path in catalog_params and set(query_keys) <= catalog_params[path]
+                       and len(query_keys) == len(set(query_keys)))
+        if (request.url.query and not valid_query) or not allowed(request.method, path):
             raise HTTPException(404, 'Unknown artifact operation')
         socket = os.environ.get('SCRIPTHUT_ARTIFACT_SOCKET')
         if not socket:
@@ -91,7 +106,8 @@ def make_artifact_router() -> APIRouter:
         client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=socket),
                                    timeout=httpx.Timeout(130, connect=10), follow_redirects=False)
         try:
-            upstream = await client.send(client.build_request(request.method, 'http://artifacts/' + quote(path, safe='/:'),
+            upstream = await client.send(client.build_request(request.method, 'http://artifacts/' + quote(path, safe='/:') +
+                                                               ('?' + request.url.query if request.url.query else ''),
                                                                content=body(), headers=headers), stream=True)
         except BaseException as exc:
             await client.aclose()

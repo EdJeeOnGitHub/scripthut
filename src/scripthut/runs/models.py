@@ -1,5 +1,7 @@
 """Data models for task runs."""
 
+from scripthut.reports.resources import ResourceUsage
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -99,6 +101,8 @@ class TaskDefinition:
     generates_source: str | None = None  # Path to JSON file this task creates on the backend
     output_file: str | None = None  # Custom stdout log path
     error_file: str | None = None  # Custom stderr log path
+    project_id: str | None = None  # Explicit reporting attribution; never inferred from job names
+    workflow_id: str | None = None
     env: list[EnvRule] = field(default_factory=list)  # Task-level env rules
     gres: str | None = None  # Slurm-style generic resource spec, e.g. "gpu:2" or "gpu:v100:1"
     image: str | None = None  # Container image URI (AWS Batch/ECS); overrides backend default
@@ -143,6 +147,8 @@ class TaskDefinition:
             )
         return cls(
             id=data["id"],
+            project_id=data.get("project_id") if isinstance(data.get("project_id"), str) else None,
+            workflow_id=data.get("workflow_id") if isinstance(data.get("workflow_id"), str) else None,
             name=data["name"],
             command=data["command"],
             working_dir=data.get("working_dir", "~"),
@@ -167,6 +173,8 @@ class TaskDefinition:
         """Serialize to dictionary for JSON storage."""
         return {
             "id": self.id,
+            **({"project_id": self.project_id} if self.project_id else {}),
+            **({"workflow_id": self.workflow_id} if self.workflow_id else {}),
             "name": self.name,
             "command": self.command,
             "working_dir": self.working_dir,
@@ -348,6 +356,7 @@ class RunItem:
     submit_script: str | None = None  # The generated submission script
     submit_output: str | None = None  # Raw stdout/stderr from sbatch/qsub/etc
     # Resource utilization (from scheduler accounting)
+    resource_usage: ResourceUsage | None = None
     cpu_efficiency: float | None = None  # 0-100%
     max_rss: str | None = None  # Peak memory, e.g. "1.2G"
     scheduler_state: str | None = None  # Confirmed final state from accounting
@@ -405,6 +414,7 @@ class RunItem:
             "error": self.error,
             "submit_script": self.submit_script,
             "submit_output": self.submit_output,
+            "resource_usage": self.resource_usage.to_dict() if self.resource_usage else None,
             "cpu_efficiency": self.cpu_efficiency,
             "max_rss": self.max_rss,
             "scheduler_state": self.scheduler_state,
@@ -444,6 +454,7 @@ class RunItem:
             error=data.get("error"),
             submit_script=data.get("submit_script") or data.get("sbatch_script"),
             submit_output=data.get("submit_output"),
+            resource_usage=ResourceUsage.from_dict(data.get("resource_usage")),
             cpu_efficiency=data.get("cpu_efficiency"),
             max_rss=data.get("max_rss"),
             scheduler_state=data.get("scheduler_state") or data.get("sacct_state"),

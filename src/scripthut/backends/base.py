@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from scripthut.reports.resources import ResourceUsage
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,7 @@ class JobStats:
     # means accounting either didn't return a row or didn't surface a
     # parseable value — distinct from "exit was 0", which is an int.
     exit_code: int | None = None
+    resource_usage: ResourceUsage | None = None
 
 
 @dataclass
@@ -115,6 +117,17 @@ class ClusterInfo:
     partitions: list[PartitionInfo]
     pending_reasons: dict[str, int]  # squeue reason -> count of pending jobs
     user_quota: QuotaInfo | None = None  # Usage/limits for the backend's own SSH login; None if unsupported
+
+    # Presentation scope only; full partition data remains available in details.
+    # None means all visible partitions, not an assertion about account access.
+    overview_partition_names: list[str] | None = None
+
+    @property
+    def overview_partitions(self) -> list[PartitionInfo]:
+        if self.overview_partition_names is None:
+            return self.partitions
+        names = set(self.overview_partition_names)
+        return [p for p in self.partitions if p.name in names]
 
     @property
     def cpus_total(self) -> int:

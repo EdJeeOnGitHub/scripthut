@@ -162,6 +162,7 @@ def build_seed(
     git_repo: str | None = None,
     git_branch: str | None = None,
     git_sha: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, str]:
     """Build the SCRIPTHUT_* runtime seed env."""
     seed: dict[str, str] = {
@@ -170,6 +171,8 @@ def build_seed(
         "SCRIPTHUT_RUN_ID": run_id,
         "SCRIPTHUT_CREATED_AT": created_at.isoformat(),
     }
+    if project_id is not None:
+        seed["SCRIPTHUT_PROJECT"] = project_id
     if git_repo is not None:
         seed["SCRIPTHUT_GIT_REPO"] = git_repo
     if git_branch is not None:
@@ -362,6 +365,7 @@ def resolve_for_task(
         git_repo=git_repo,
         git_branch=git_branch,
         git_sha=git_sha,
+        project_id=task.project_id,
     )
     rules = collect_rules(
         config, backend_name=backend_name, workflow_name=workflow_name,
@@ -400,6 +404,7 @@ def resolve_for_task_detailed(
         git_repo=git_repo,
         git_branch=git_branch,
         git_sha=git_sha,
+        project_id=task.project_id,
     )
     rules = collect_rules(
         config, backend_name=backend_name, workflow_name=workflow_name,

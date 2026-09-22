@@ -59,7 +59,7 @@ def test_adhoc_task_endpoint_creates_run():
 
     body = {
         "backend": "test-cluster",
-        "task": {"id": "adhoc-abc", "name": "adhoc", "command": "echo hi"},
+        "task": {"project_id": "test-project", "id": "adhoc-abc", "name": "adhoc", "command": "echo hi"},
     }
     resp = _client(state).post("/api/v1/tasks/run", json=body)
     assert resp.status_code == 200
@@ -83,7 +83,7 @@ def test_adhoc_task_endpoint_passes_run_name_override():
 
     body = {
         "backend": "test-cluster",
-        "task": {"id": "x", "name": "x", "command": "echo hi"},
+        "task": {"project_id": "test-project", "id": "x", "name": "x", "command": "echo hi"},
         "run_name": "my-experiment",
     }
     _client(state).post("/api/v1/tasks/run", json=body)
@@ -94,7 +94,7 @@ def test_adhoc_task_missing_backend_returns_422():
     rm = MagicMock()
     state = _state(rm)
 
-    body = {"task": {"id": "x", "name": "x", "command": "echo hi"}}
+    body = {"task": {"project_id": "test-project", "id": "x", "name": "x", "command": "echo hi"}}
     resp = _client(state).post("/api/v1/tasks/run", json=body)
     assert resp.status_code == 422
 
@@ -118,7 +118,7 @@ def test_adhoc_task_unknown_backend_returns_422():
 
     body = {
         "backend": "nope",
-        "task": {"id": "x", "name": "x", "command": "echo hi"},
+        "task": {"project_id": "test-project", "id": "x", "name": "x", "command": "echo hi"},
     }
     resp = _client(state).post("/api/v1/tasks/run", json=body)
     assert resp.status_code == 422
@@ -130,6 +130,7 @@ def test_adhoc_task_unknown_backend_returns_422():
 
 def _ns(**kwargs) -> argparse.Namespace:
     defaults = {
+        "project": "test-project",
         "command": None,
         "from_stdin": False,
         "from_file": None,

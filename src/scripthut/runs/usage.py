@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from scripthut.reports.attribution import project_name
 from scripthut.runs.models import Run, RunItemStatus
 
 logger = logging.getLogger(__name__)
@@ -66,8 +67,8 @@ def records_from_runs(runs: Iterable[Run]) -> Iterator[UsageRecord]:
                 cpus=item.task.cpus or 1,
                 started_at=item.started_at,
                 finished_at=item.finished_at,
-                workflow_name=run.workflow_name,
-                source_name=run.source_name,
+                workflow_name=item.task.workflow_id or run.workflow_name,
+                source_name=project_name(run, item.task),
                 backend_name=run.backend_name,
                 status=item.status.value,
             )
@@ -76,7 +77,8 @@ def records_from_runs(runs: Iterable[Run]) -> Iterator[UsageRecord]:
 class UsageLog:
     """JSONL ledger at ``<data_dir>/usage.jsonl``.
 
-    One line per finished task, appended and never rewritten. At roughly
+    Entries are appended and never rewritten; attribution corrections supersede
+    earlier entries with the same task identity. At roughly
     200 bytes a line, a decade of a hundred jobs a day is under 80 MB; the
     file is not pruned, so the full history stays available for a longer
     graph later.
@@ -85,6 +87,7 @@ class UsageLog:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._keys: set[tuple[str, str]] | None = None
+        self._attribution: dict[tuple[str, str], tuple[str | None, str]] = {}
 
     # -- reading ---------------------------------------------------------
 
@@ -111,7 +114,7 @@ class UsageLog:
         """Ledger entries, optionally limited to those starting on/after ``since``."""
         if not self.path.exists():
             return []
-        out: list[UsageRecord] = []
+        out: dict[tuple[str, str], UsageRecord] = {}
         try:
             with open(self.path) as f:
                 for line in f:
@@ -123,14 +126,16 @@ class UsageLog:
                         continue
                     if since and rec.started_at.astimezone().date() < since:
                         continue
-                    out.append(rec)
+                    out[rec.key] = rec
         except OSError as e:
             logger.error(f"Failed to read usage log {self.path}: {e}")
-        return out
+        return list(out.values())
 
     def _known_keys(self) -> set[tuple[str, str]]:
         if self._keys is None:
-            self._keys = {r.key for r in self.records()}
+            records = self.records()
+            self._keys = {r.key for r in records}
+            self._attribution = {r.key: (r.source_name, r.workflow_name) for r in records}
         return self._keys
 
     # -- writing ---------------------------------------------------------
@@ -144,7 +149,8 @@ class UsageLog:
         known = self._known_keys()
         pending = [
             rec for rec in records_from_runs(runs)
-            if rec.status in {s.value for s in _TERMINAL} and rec.key not in known
+            if rec.status in {s.value for s in _TERMINAL} and (rec.key not in known or (rec.source_name and
+                self._attribution.get(rec.key) != (rec.source_name, rec.workflow_name)))
         ]
         if not pending:
             return 0
@@ -174,6 +180,7 @@ class UsageLog:
             return 0
 
         known.update(rec.key for rec in pending)
+        self._attribution.update({r.key: (r.source_name, r.workflow_name) for r in pending})
         logger.info(f"Recorded {len(pending)} finished task(s) to the usage log")
         return len(pending)
 

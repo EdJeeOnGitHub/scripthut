@@ -140,12 +140,38 @@ def make_api_router(state: AppState) -> APIRouter:
             )
         return state.run_manager
 
+    async def efficiency_query(kind, **params):
+        import asyncio
+        from scripthut.reports.query import query
+        try:
+            return await asyncio.to_thread(query, state, kind, **params)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Efficiency history unavailable")
+            raise HTTPException(503, "Efficiency history is temporarily unavailable") from exc
+
+    @router.get("/efficiency/summary")
+    async def efficiency_summary(days: int = 30, project: str = '', backend: str = '', workflow: str = ''):
+        return await efficiency_query('summary', days=days, project=project, backend=backend, workflow=workflow)
+
+    @router.get("/efficiency/jobs")
+    async def efficiency_jobs(days: int = 30, project: str = '', backend: str = '', workflow: str = '', limit: int = 100, offset: int = 0):
+        return await efficiency_query('jobs', days=days, project=project, backend=backend, workflow=workflow, limit=limit, offset=offset)
+
+    @router.get("/efficiency/runs/{run_id}")
+    async def efficiency_run(run_id: str, limit: int = 100, offset: int = 0):
+        return await efficiency_query('run', run_id=run_id, limit=limit, offset=offset)
+
     @router.get("/capabilities")
     async def capabilities() -> dict[str, Any]:
         journal = _require_manager().request_journal
         return {
             "schema_version": 1,
             "capabilities": {
+                "efficiency_reports": 1,
                 "backend_storage": 1,
                 "keyed_submission": 1 if journal is not None else 0,
                 "archive_acknowledgement": 1 if journal is not None else 0,
@@ -361,6 +387,9 @@ def make_api_router(state: AppState) -> APIRouter:
                         "request_key": key,
                     }
             else:
+                from scripthut.projects import require_project
+
+                require_project(task_dict.get("project_id"))
                 if payload.get("artifact_refs"):
                     raise ValueError(
                         "Artifact references require a durable keyed submission"

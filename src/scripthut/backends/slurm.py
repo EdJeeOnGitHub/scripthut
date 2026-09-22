@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from scripthut.reports.resources import slurm_resources
+
 from scripthut.backends.base import (
     ClusterInfo,
     DiskInfo,
@@ -460,7 +462,7 @@ class SlurmBackend(JobBackend):
         cmd = (
             f"TZ=UTC sacct --noheader --parsable2"
             f" --format=JobIDRaw,TotalCPU,Elapsed,AllocCPUS,MaxRSS,"
-            f"Start,End,State,ExitCode"
+            f"Start,End,State,ExitCode,AllocTRES,ReqMem,NNodes,NTasks"
             f" --jobs={ids_str}"
         )
 
@@ -474,6 +476,8 @@ class SlurmBackend(JobBackend):
             raise TransportError(f"sacct failed (exit {exit_code}): {stderr}")
 
         logger.debug(f"sacct raw output ({len(stdout)} chars): {stdout[:500]}")
+
+        normalized_resources = slurm_resources(stdout)
 
         # Parse sacct output. Each job produces multiple lines (main, .batch, .extern).
         # Collect Elapsed/AllocCPUS/TotalCPU from main entry, TotalCPU from .batch,
@@ -591,7 +595,11 @@ class SlurmBackend(JobBackend):
 
             rss_formatted = format_bytes(max_rss_bytes.get(job_id, 0))
 
+            resource = normalized_resources.get(job_id)
+            if resource and resource.cpu_efficiency is not None:
+                efficiency = resource.cpu_efficiency
             stats[job_id] = JobStats(
+                resource_usage=resource,
                 cpu_efficiency=round(efficiency, 1),
                 max_rss=rss_formatted,
                 total_cpu=f"{total_cpu_s:.0f}s",
@@ -641,10 +649,18 @@ class SlurmBackend(JobBackend):
             partitions=partitions,
             pending_reasons=pending_reasons,
             user_quota=user_quota,
+            overview_partition_names=sorted({
+                name.strip()
+                for value in [self._default_partition, *self._partition_map.values()]
+                if value
+                for name in value.split(",")
+                if name.strip()
+            }) or None,
         )
 
     async def _fetch_partitions(self) -> list[PartitionInfo] | None:
-        # Aggregate one row per partition with %P (default marked with *).
+        # A custom format overrides --summarize; hardware features can split
+        # a partition across disjoint node groups. Merge those counts below.
         # Fields: PartitionName | Avail | A/I/O/T cpus | total nodes | mem/node | timelimit | features
         fmt = "%P|%a|%C|%D|%m|%l|%f"
         cmd = f"sinfo --noheader --summarize --format='{fmt}'"
@@ -705,7 +721,22 @@ class SlurmBackend(JobBackend):
                 is_default=is_default,
             ))
 
-        return partitions
+        grouped: dict[str, PartitionInfo] = {}
+        for row in partitions:
+            if row.name not in grouped:
+                grouped[row.name] = row
+                continue
+            target = grouped[row.name]
+            for key in ('cpus_allocated', 'cpus_idle', 'cpus_other', 'cpus_total', 'nodes_total'):
+                setattr(target, key, getattr(target, key) + getattr(row, key))
+            target.is_default = target.is_default or row.is_default
+            # Do not present one node group's hardware as partition-wide.
+            for key in ('mem_per_node_mb', 'features', 'timelimit'):
+                if getattr(target, key) != getattr(row, key):
+                    setattr(target, key, None)
+            if target.state != row.state:
+                target.state = 'mixed'
+        return list(grouped.values())
 
     async def _fetch_node_info(self) -> dict[str, _PartitionNodeStats]:
         """Return per-partition node-level availability for scheduling hints.

@@ -117,3 +117,27 @@ async def test_patch_is_forwarded_before_full_body_arrives(tmp_path, monkeypatch
     assert received==payload
     assert b'X-Artifact-Token: session-secret' in headers
     assert b'PATCH /artifact-uploads/' in headers
+
+
+@pytest.mark.asyncio
+async def test_catalog_proxy_query_allowlist(tmp_path, monkeypatch):
+    socket = str(tmp_path / 'catalog.sock')
+    monkeypatch.setenv('SCRIPTHUT_ARTIFACT_SOCKET', socket)
+    captured = []
+    async def serve(reader, writer):
+        captured.append(await reader.readuntil(b'\r\n\r\n'))
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+    server = await asyncio.start_unix_server(serve, path=socket)
+    app = FastAPI()
+    app.include_router(make_artifact_router())
+    async with server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.get('/api/v1/artifact-catalog/publications?project=pilot&kind=data&page=2')
+        assert response.status_code == 200
+        for path in ('projects?url=http://other', 'projects?page=1&page=2', 'storage?path=/etc', '../host.json'):
+            assert (await client.get('/api/v1/artifact-catalog/' + path)).status_code == 404
+        assert (await client.post('/api/v1/artifact-catalog/projects')).status_code == 405
+    assert len(captured) == 1
+    assert b'?project=pilot&kind=data&page=2 HTTP/1.1' in captured[0]
