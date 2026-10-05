@@ -98,7 +98,8 @@ class RunStorageManager:
         """Write run.json atomically."""
         # Later dirty saves must not replace a durable attempt with an
         # unflushed file. Keep the durability guarantee for the run's lifetime.
-        sync = (durable or run.request_key is not None or run.interactive_wait
+        sync = (durable or run.failure is not None or run.request_key is not None
+                or run.interactive_wait
                 or any(i.submission_attempts for i in run.items))
         if run.workflow_name == "_default":
             # Weekly bins use a different directory structure
@@ -143,6 +144,7 @@ class RunStorageManager:
             "agent_session_name": run.agent_session_name,
             "artifact_refs": run.artifact_refs,
             "request_key": run.request_key,
+            "failure": run.failure,
             "items": [item.to_dict() for item in run.items],
         }
 
@@ -223,6 +225,7 @@ class RunStorageManager:
                 agent_session_name=data.get("agent_session_name"),
                 artifact_refs=data.get("artifact_refs"),
                 request_key=data.get("request_key"),
+                failure=data.get("failure"),
             )
         except Exception as e:
             logger.error(f"Failed to load run from {run_dir}: {e}")

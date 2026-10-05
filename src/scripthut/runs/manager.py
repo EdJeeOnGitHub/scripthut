@@ -2686,7 +2686,7 @@ class RunManager:
             for item in run.items
         )
 
-    async def cancel_run(self, run_id: str) -> bool:
+    async def cancel_run(self, run_id: str, failure: dict[str, Any] | None = None) -> bool:
         run = self.runs.get(run_id)
         if run is None:
             return False
@@ -2695,8 +2695,37 @@ class RunManager:
                 raise SubmissionConflict("Resolve unknown submissions before cancelling this run")
             if not self.available(run.backend_name):
                 raise SubmissionConflict("Backend unavailable; cancellation was not sent")
+            if failure is not None:
+                run.failure = failure
+                if self.storage and not self.storage.save_run(run, durable=True):
+                    raise SubmissionConflict("Could not persist deployment cancellation intent")
             self._invalidate_observations(run)
-            return await self._cancel_run(run_id)
+            cancelled = await self._cancel_run(run_id)
+            if failure is not None:
+                backend = self.get_job_backend(run.backend_name)
+                ids = [item.job_id for item in run.items if item.job_id]
+                if ids and backend is None:
+                    raise SubmissionConflict("Scheduler termination cannot be verified")
+                if ids and backend is not None:
+                    deadline = asyncio.get_running_loop().time() + 60
+                    terminal = {"COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL",
+                                "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY"}
+                    while True:
+                        jobs = await backend.get_jobs()
+                        stats = await backend.get_job_stats(ids)
+                        queued = {job.job_id for job in jobs}
+                        if all(job_id not in queued and job_id in stats
+                               and (stats[job_id].state or "").partition(" ")[0] in terminal
+                               for job_id in ids):
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise SubmissionConflict(
+                                "Cancellation sent; scheduler termination is not yet verified"
+                            )
+                        await asyncio.sleep(1)
+                if self.storage and not self.storage.save_run(run, durable=True):
+                    raise SubmissionConflict("Could not persist cancellation result")
+            return cancelled
 
     async def _cancel_run(self, run_id: str) -> bool:
         """Cancel all pending and running items in a run."""
@@ -2709,7 +2738,7 @@ class RunManager:
         for item in run.items:
             if item.status == RunItemStatus.PENDING:
                 item.status = RunItemStatus.FAILED
-                item.error = "Cancelled"
+                item.error = run.failure["message"] if run.failure else "Cancelled"
                 item.finished_at = datetime.now(timezone.utc)
             elif item.status in (
                 RunItemStatus.SUBMITTED,
@@ -2729,7 +2758,7 @@ class RunManager:
                         await ssh_client.run_command(f"scancel {item.job_id}")
                 item.started_at = item.started_at or item.submitted_at
                 item.status = RunItemStatus.FAILED
-                item.error = "Cancelled"
+                item.error = run.failure["message"] if run.failure else "Cancelled"
                 item.finished_at = datetime.now(timezone.utc)
 
         self._persist_run(run)

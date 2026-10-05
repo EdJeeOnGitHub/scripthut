@@ -748,3 +748,24 @@ async def test_verification_spawn_failure_does_not_discard_accepted_job(setup):
     assert item.status == Status.SUBMISSION_UNKNOWN
     assert item.job_id == '42'
     assert item.submission_attempts[-1].job_id == '42'
+
+
+@pytest.mark.asyncio
+async def test_deployment_cancellation_persists_reason_and_verifies_scheduler(setup):
+    from scripthut.backends.base import JobStats
+    manager, run, _, backend = setup
+    run.items[0].status = Status.RUNNING
+    run.items[0].job_id = "42"
+    failure = {"code": "deployment_interrupted", "deployment_id": "deploy1",
+               "message": "Stopped for deployment", "retry_status_url": "/api/v1/deployments/deploy1"}
+    async def cancel(job_id):
+        assert manager.storage.load_all_runs()[run.id].failure == failure
+    backend.cancel_job = AsyncMock(side_effect=cancel)
+    backend.get_jobs = AsyncMock(return_value=[])
+    backend.get_job_stats = AsyncMock(return_value={"42": JobStats(cpu_efficiency=0, max_rss="0", total_cpu="0", state="CANCELLED")})
+    assert await manager.cancel_run(run.id, failure=failure)
+    backend.cancel_job.assert_awaited_once_with("42")
+    stored = manager.storage.load_all_runs()[run.id]
+    assert stored.failure == failure
+    assert stored.items[0].error == failure["message"]
+    assert stored.items[1].status == Status.FAILED
