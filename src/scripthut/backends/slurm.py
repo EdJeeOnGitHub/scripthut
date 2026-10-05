@@ -1123,12 +1123,8 @@ class SlurmBackend(JobBackend):
         accepted: Callable[[str, str], None],
     ) -> SubmitResult:
         """Submit once, persisting the returned ID before any verification query."""
-        delimiter = f"SCRIPTHUT_{attempt.id}"
-        command = (
-            f"sbatch --job-name={shlex.quote(attempt.scheduler_name)} <<'{delimiter}'\n"
-            f"{script}\n{delimiter}"
-        )
-        stdout, stderr, code = await self._ssh.run_command(command)
+        command = f"sbatch --job-name={shlex.quote(attempt.scheduler_name)}"
+        stdout, stderr, code = await self._ssh.run_command(command, input=script)
         output = format_submit_output(stdout, stderr)
         match = _SBATCH_JOB_ID_RE.search(stdout) or _SBATCH_JOB_ID_RE.search(stderr)
         if match:

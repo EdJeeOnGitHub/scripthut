@@ -23,6 +23,7 @@ class SubmissionAttempt:
     resolution: str = "unknown"
     job_id: str | None = None
     detail: str | None = None
+    submission_error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

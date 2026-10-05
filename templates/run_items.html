@@ -9,7 +9,7 @@
 <details class="p-4 border-b border-orange-200" {% if item.submission_unresolved %}open{% endif %}>
     <summary>{{ item.task.id }} — submission history{% if item.submission_unresolved %} (resolution required){% endif %}</summary>
     {% for attempt in item.submission_attempts %}
-    <p class="text-sm break-all">{{ attempt.created_at.isoformat() }} · {{ attempt.id }} · {{ attempt.resolution }} · job {{ attempt.job_id or 'unknown' }}<br>{{ attempt.scheduler_name }} · {{ attempt.user }} · {{ attempt.destination }}<br>{{ attempt.detail or '' }}</p>
+    <p class="text-sm break-all">{{ attempt.created_at.isoformat() }} · {{ attempt.id }} · {{ attempt.resolution }} · job {{ attempt.job_id or 'unknown' }}<br>{{ attempt.scheduler_name }} · {{ attempt.user }} · {{ attempt.destination }}<br>{{ attempt.detail or '' }}{% if attempt.submission_error %}<br>Original error: {{ attempt.submission_error }}{% endif %}</p>
     {% endfor %}
     {% if item.submission_unresolved %}
     <p class="text-sm my-2">This run is paused. A lost response may hide an accepted job. Check the scheduler before authorizing another submission.</p>
@@ -19,6 +19,7 @@
         <button name="action" value="bind" class="border rounded px-2 py-1">Verify and bind ID</button>
         <label class="text-sm"><input name="confirm_not_submitted" type="checkbox"> I verified that this attempt submitted no job</label>
         <button name="action" value="retry" class="border rounded px-2 py-1">Authorize retry</button>
+        <button name="action" value="abandon" class="border rounded px-2 py-1">Abandon submission</button>
         <span role="status" class="text-sm text-orange-700"></span>
     </form>
     {% endif %}

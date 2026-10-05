@@ -158,7 +158,9 @@ class SSHClient:
             error=error,
         ))
 
-    async def run_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+    async def run_command(
+        self, command: str, timeout: int = 30, *, input: str | None = None,
+    ) -> tuple[str, str, int]:
         """
         Run a command on the remote host.
 
@@ -178,7 +180,9 @@ class SSHClient:
         start = time.perf_counter()
         try:
             result = await asyncio.wait_for(
-                self._connection.run(command, check=False),
+                self._connection.run(
+                    command, check=False, input=input,
+                ),
                 timeout=timeout,
             )
             stdout = result.stdout or ""

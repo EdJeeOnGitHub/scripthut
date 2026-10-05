@@ -4158,7 +4158,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_run_watch)
     p_run_watch.set_defaults(handler=_cmd_run_watch)
 
-    p_resolve = run_sub.add_parser("resolve", help="Resolve an unknown Slurm submission")
+    p_resolve = run_sub.add_parser(
+        "resolve", help="Resolve an unknown Slurm submission (abandon closes it without retrying)",
+    )
     p_resolve.add_argument("id")
     p_resolve.add_argument("task")
     p_resolve.add_argument(
@@ -4168,7 +4170,9 @@ def build_parser() -> argparse.ArgumentParser:
             "omit to act on the task's current attempt."
         ),
     )
-    p_resolve.add_argument("--action", choices=["check", "bind", "retry"], default="check")
+    p_resolve.add_argument(
+        "--action", choices=["check", "bind", "retry", "abandon"], default="check",
+    )
     p_resolve.add_argument("--job-id")
     p_resolve.add_argument("--confirm-not-submitted", action="store_true")
     _add_common(p_resolve)

@@ -24,6 +24,10 @@
             message.textContent = 'Retry requires explicit confirmation that no job was submitted.';
             return;
         }
+        if (action === 'abandon' && (!confirmed || !window.confirm('Close this task as failed without submitting another job?'))) {
+            message.textContent = 'Abandon requires confirmation that no job was submitted.';
+            return;
+        }
         const buttons = form.querySelectorAll('button');
         buttons.forEach(button => button.disabled = true);
         try {

@@ -37,7 +37,9 @@ class ExecutionClient(Protocol):
     def is_connected(self) -> bool: ...
     async def connect(self, timeout: int = 15) -> None: ...
     async def disconnect(self) -> None: ...
-    async def run_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]: ...
+    async def run_command(
+        self, command: str, timeout: int = 30, *, input: str | None = None,
+    ) -> tuple[str, str, int]: ...
     async def create_interactive_session(
         self, command: str | None = None, term_type: str = "xterm-256color",
         term_size: tuple[int, int] = (80, 24),
@@ -51,3 +53,7 @@ class ExecutionClient(Protocol):
 
 class TransportError(RuntimeError):
     """A command could not be completed; its remote side effects may be unknown."""
+
+
+class ExecutionNotStartedError(TransportError):
+    """Execution definitely did not start; no remote command was sent."""
