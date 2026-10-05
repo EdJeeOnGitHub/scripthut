@@ -575,6 +575,7 @@ class Run:
     agent_session_name: str | None = None
     artifact_refs: dict[str, Any] | None = None
     request_key: str | None = None
+    failure: dict[str, Any] | None = None
 
     @property
     def submission_unresolved(self) -> bool:

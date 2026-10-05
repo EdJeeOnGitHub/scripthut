@@ -71,6 +71,7 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "backend_name": run.backend_name,
         "created_at": run.created_at.isoformat(),
         "status": run.status.value,
+        "failure": run.failure,
         "task_count": total,
         "completed_count": completed,
         "submitted_count": submitted_count,
@@ -176,6 +177,7 @@ def make_api_router(state: AppState) -> APIRouter:
             "schema_version": 1,
             "capabilities": {
                 "efficiency_reports": 1,
+                "deployment_interruption": 1,
                 "backend_storage": 1,
                 "keyed_submission": 1 if journal is not None else 0,
                 "archive_acknowledgement": 1 if journal is not None else 0,
@@ -884,10 +886,16 @@ def make_api_router(state: AppState) -> APIRouter:
         return result
 
     @router.post("/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str) -> dict[str, Any]:
+    async def cancel_run(run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         rm = _require_manager()
         try:
-            cancelled = await rm.cancel_run(run_id)
+            failure = None
+            if body:
+                if set(body) != {"deployment_id"} or not isinstance(body["deployment_id"], str):
+                    raise HTTPException(400, "Expected a deployment_id")
+                from scripthut.maintenance import cancellation_failure
+                failure = cancellation_failure(body["deployment_id"])
+            cancelled = await rm.cancel_run(run_id, failure=failure)
         except SubmissionConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not cancelled:

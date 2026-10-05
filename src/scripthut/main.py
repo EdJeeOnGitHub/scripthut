@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
+from scripthut.maintenance import make_maintenance_router
 from scripthut.reports.attribution import project_name
 from scripthut.reports.allocations import AllocationReader
 
@@ -757,6 +758,7 @@ from scripthut.research_api import make_research_router
 from scripthut.artifact_api import make_artifact_router
 
 app.include_router(make_research_router())
+app.include_router(make_maintenance_router())
 app.include_router(make_artifact_router())
 app.include_router(make_api_router(state))
 app.include_router(make_login_router(state))
