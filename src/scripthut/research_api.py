@@ -21,7 +21,8 @@ def make_research_router() -> APIRouter:
                     'code': 'deployment_in_progress',
                     'deployment_id': gate.get('deployment_id'),
                     'retry_status_url': gate.get('retry_status_url'),
-                    'detail': 'Deployment in progress; wait for verified readiness before retrying.',
+                    'detail': ('Deployment in progress; '
+                               'wait for verified readiness before retrying.'),
                 })
         socket = os.environ.get('SCRIPTHUT_RESEARCH_SOCKET')
         if not socket:
