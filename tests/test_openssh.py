@@ -66,10 +66,10 @@ async def ssh_master(tmp_path):
             else:
                 child = await asyncio.create_subprocess_shell(
                     process.command or "true", cwd=tmp_path,
-                    stdin=asyncio.subprocess.DEVNULL,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
-                out, err = await child.communicate()
+                out, err = await child.communicate((await process.stdin.read()).encode())
                 process.stdout.write(out.decode())
                 process.stderr.write(err.decode())
                 process.exit(child.returncode)
@@ -498,8 +498,10 @@ async def test_submission_recovers_after_master_loss_and_controller_restart(ssh_
         path.chmod(0o700)
     original = client.run_command
 
-    async def with_path(command, timeout=30):
-        return await original(f"export PATH={shlex.quote(str(tmp_path))}:$PATH; {command}", timeout)
+    async def with_path(command, timeout=30, **kwargs):
+        return await original(
+            f"export PATH={shlex.quote(str(tmp_path))}:$PATH; {command}", timeout, **kwargs,
+        )
 
     client.run_command = with_path
     config = SimpleNamespace(get_backend=lambda name: SimpleNamespace(max_concurrent=4))

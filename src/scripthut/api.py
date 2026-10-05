@@ -98,7 +98,11 @@ class SubmissionResolutionRequest(BaseModel):
     # Pass it only to guard against acting on an attempt that changed
     # underneath a caller holding a stale run view.
     attempt_id: str | None = None
-    action: str = "check"
+    action: str = Field(
+        default="check",
+        description=("check, bind, retry, or abandon; abandon requires attempt_id "
+                     "and confirm_not_submitted"),
+    )
     job_id: str | None = None
     confirm_not_submitted: bool = False
 

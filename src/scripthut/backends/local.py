@@ -54,6 +54,7 @@ from scripthut.backends.base import (
 from scripthut.backends.utils import generate_script_body
 from scripthut.identity import local_user
 from scripthut.models import HPCJob, JobState
+from scripthut.ssh.transport import ExecutionNotStartedError
 
 if TYPE_CHECKING:
     from scripthut.runs.models import TaskDefinition
@@ -146,24 +147,35 @@ class LocalExecClient:
         ))
 
     async def run_command(
-        self, command: str, timeout: int = 30,
+        self, command: str, timeout: int = 30, *, input: str | None = None,
     ) -> tuple[str, str, int]:
         """Run ``command`` through the local shell; same contract as SSHClient."""
         start = time.perf_counter()
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdin=asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            self._log(command, start, error=str(exc))
+            raise ExecutionNotStartedError(str(exc)) from exc
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+                proc.communicate(input.encode("utf-8") if input is not None else None),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             self._log(command, start, error=f"Timeout after {timeout}s")
             raise RuntimeError(f"Command timed out after {timeout}s")
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            raise
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
         exit_code = proc.returncode if proc.returncode is not None else -1

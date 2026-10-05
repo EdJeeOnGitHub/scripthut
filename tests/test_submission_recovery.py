@@ -338,7 +338,7 @@ async def test_debug_submission_is_durable_and_reused_after_loss(setup):
             assert len(saved) == 1
             assert saved[0].interactive_wait
             assert saved[0].items[0].status == Status.SUBMITTING
-            assert "Waiting for continue signal" in cmd
+            assert "Waiting for continue signal" in kwargs["input"]
             raise TransportError("debug response lost")
         return "", "", 0
 
@@ -608,3 +608,143 @@ async def test_dirty_save_preserves_durability_and_retries_disk_errors(setup, mo
     monkeypatch.setattr(os, "fsync", original)
     manager.save_dirty()
     assert run.id not in manager.storage._dirty_runs
+
+
+@pytest.mark.asyncio
+async def test_pre_execution_failure_is_terminal_and_cascades(setup):
+    from scripthut.ssh.transport import ExecutionNotStartedError
+    manager, run, ssh, _ = setup
+    async def command(cmd, **kwargs):
+        if cmd.startswith('sbatch'):
+            raise ExecutionNotStartedError('Argument list too long')
+        return '', '', 0
+    ssh.run_command.side_effect = command
+    await manager.process_run(run)
+    await manager.process_run(run)
+    assert run.items[0].status == Status.FAILED
+    assert run.items[1].status == Status.FAILED
+    attempt = disk_item(manager).submission_attempts[-1]
+    assert attempt.resolution == 'not_submitted'
+    assert attempt.submission_error == 'Argument list too long'
+
+
+@pytest.mark.asyncio
+async def test_original_error_survives_reconciliation_and_reload(setup):
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    await manager.submissions.reconcile(run)
+    attempt = disk_item(manager).submission_attempts[-1]
+    assert 'response lost' in attempt.submission_error
+    assert 'Found 0' in attempt.detail
+    from scripthut.submission import SubmissionAttempt
+    historical = attempt.to_dict()
+    historical.pop('submission_error')
+    assert SubmissionAttempt.from_dict(historical).submission_error is None
+
+
+@pytest.mark.asyncio
+async def test_abandon_closes_task_without_retry_or_cancel(setup):
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    item = run.items[0]
+    original = item.submission_attempts[-1].submission_error
+    ssh.run_command.reset_mock()
+    await manager.submissions.resolve(run, item, action='abandon',
+        attempt_id=item.submission_attempts[-1].id, confirm_not_submitted=True)
+    assert item.status == Status.FAILED
+    assert run.items[1].status == Status.DEP_FAILED
+    assert run.status.value == 'failed'
+    assert disk_item(manager).submission_attempts[-1].submission_error == original
+    assert all('sbatch' not in c.args[0] and 'scancel' not in c.args[0]
+               for c in ssh.run_command.call_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('guard', ['confirmation', 'identity', 'stale', 'destination',
+                                   'user', 'unavailable', 'query_error', 'match', 'recorded_id'])
+async def test_abandon_guards_leave_unknown_untouched(setup, guard):
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    item = run.items[0]
+    attempt = item.submission_attempts[-1]
+    kwargs = dict(action='abandon', attempt_id=attempt.id, confirm_not_submitted=True)
+    if guard == 'confirmation': kwargs['confirm_not_submitted'] = False
+    if guard == 'identity': kwargs['attempt_id'] = None
+    if guard == 'stale': kwargs['attempt_id'] = 'stale'
+    if guard == 'destination': attempt.destination = 'elsewhere'
+    if guard == 'user': attempt.user = 'bob'
+    if guard == 'unavailable': manager.available = lambda name: False
+    if guard == 'query_error':
+        ssh.run_command.side_effect = responses(manager, run, lose=True, query_error=True)
+    if guard == 'match':
+        ssh.run_command.side_effect = responses(manager, run, lose=True, matches=('42',))
+    if guard == 'recorded_id': attempt.job_id = '42'
+    with pytest.raises((SubmissionConflict, TransportError)):
+        await manager.submissions.resolve(run, item, **kwargs)
+    assert item.status == Status.SUBMISSION_UNKNOWN
+    assert disk_item(manager).status == Status.SUBMISSION_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_abandon_api_cli_and_ui(setup):
+    import httpx
+    from fastapi import FastAPI
+    from scripthut.api import make_api_router
+    from scripthut.cli import build_parser
+    from pathlib import Path
+    manager, run, ssh, _ = setup
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    app = FastAPI()
+    app.include_router(make_api_router(SimpleNamespace(run_manager=manager, notify_poll=lambda: None)))
+    body = dict(action='abandon', attempt_id=run.items[0].submission_attempts[-1].id,
+                confirm_not_submitted=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+        path = '/api/v1/runs/run/tasks/one/submission'
+        denied = await client.post(path, json=body, headers={'Origin': 'http://elsewhere'})
+        assert denied.status_code == 403
+        missing = await client.post(path, json={**body, 'confirm_not_submitted': False})
+        assert missing.status_code == 409
+        result = await client.post(path, json=body)
+        assert result.status_code == 200
+        assert result.json()['status'] == 'failed'
+    args = build_parser().parse_args(['run', 'resolve', 'run', 'one', '--action', 'abandon',
+                                    '--attempt', body['attempt_id'], '--confirm-not-submitted'])
+    assert args.action == 'abandon' and args.confirm_not_submitted
+    templates = Path(__file__).resolve().parents[1] / 'templates'
+    assert 'value="abandon"' in (templates / 'run_items.html').read_text()
+    assert "action === 'abandon'" in (templates / 'run_detail.html').read_text()
+
+
+@pytest.mark.asyncio
+async def test_abandon_does_not_deadlock_independent_pending_task(setup):
+    manager, run, ssh, _ = setup
+    run.items[1].task.dependencies = []
+    ssh.run_command.side_effect = responses(manager, run, lose=True, matches=())
+    await manager.process_run(run)
+    item = run.items[0]
+    # Subsequent independent work may proceed normally once the unknown clears.
+    ssh.run_command.side_effect = AsyncMock(return_value=('', '', 0))
+    await asyncio.wait_for(manager.submissions.resolve(run, item, action='abandon',
+        attempt_id=item.submission_attempts[-1].id, confirm_not_submitted=True), 2)
+    assert item.status == Status.FAILED
+
+
+@pytest.mark.asyncio
+async def test_verification_spawn_failure_does_not_discard_accepted_job(setup):
+    from scripthut.ssh.transport import ExecutionNotStartedError
+    manager, run, ssh, _ = setup
+    normal = responses(manager, run)
+    async def command(cmd, **kwargs):
+        if cmd.startswith('squeue'):
+            raise ExecutionNotStartedError('ssh executable missing')
+        return await normal(cmd, **kwargs)
+    ssh.run_command.side_effect = command
+    await manager.process_run(run)
+    item = disk_item(manager)
+    assert item.status == Status.SUBMISSION_UNKNOWN
+    assert item.job_id == '42'
+    assert item.submission_attempts[-1].job_id == '42'

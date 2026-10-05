@@ -16,7 +16,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING
 
 from scripthut.ssh.command_log import CommandLogEntry
-from scripthut.ssh.transport import InteractiveProcess, TransportError
+from scripthut.ssh.transport import ExecutionNotStartedError, InteractiveProcess, TransportError
 
 if TYPE_CHECKING:
     from scripthut.config_schema import SSHConfig
@@ -105,18 +105,28 @@ class OpenSSHClient:
         self._backoff = 0.0
         self._next_probe = time.monotonic() + 30.0
 
-    async def _execute(self, argv: list[str], timeout: int) -> tuple[str, str, int]:
+    async def _execute(
+        self, argv: list[str], timeout: int, *, input: str | None = None,
+    ) -> tuple[str, str, int]:
         async with self._slots:
             async with self._lifecycle_lock:
                 if self._shutdown:
                     raise TransportError("OpenSSH client is closed")
-                process = await asyncio.create_subprocess_exec(
-                    *argv, stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *argv,
+                        stdin=(asyncio.subprocess.PIPE if input is not None
+                               else asyncio.subprocess.DEVNULL),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                except OSError as exc:
+                    raise ExecutionNotStartedError(str(exc)) from exc
                 self._children.add(process)
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input.encode("utf-8") if input is not None else None),
+                    timeout,
+                )
                 return (
                     stdout.decode("utf-8", errors="replace"),
                     stderr.decode("utf-8", errors="replace"),
@@ -170,7 +180,9 @@ class OpenSSHClient:
         if health.state != "connected":
             raise TransportError(health.error or "OpenSSH socket is disconnected")
 
-    async def run_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+    async def run_command(
+        self, command: str, timeout: int = 30, *, input: str | None = None,
+    ) -> tuple[str, str, int]:
         start = time.perf_counter()
         stdout = stderr = ""
         code: int | None = None
@@ -179,7 +191,7 @@ class OpenSSHClient:
             self.health.socket_exists = False
             identity = self._socket_stat()
             stdout, stderr, code = await self._execute(
-                [*self._argv(), "-T", "--", self.host, command], timeout,
+                [*self._argv(), "-T", "--", self.host, command], timeout, input=input,
             )
             if code == 255 or code < 0:
                 raise TransportError(stderr.strip() or f"OpenSSH exited with status {code}")
@@ -189,6 +201,8 @@ class OpenSSHClient:
             error = str(exc)
             if not self._shutdown:
                 self._failed(error)
+            if isinstance(exc, ExecutionNotStartedError):
+                raise
             raise TransportError(error) from exc
         finally:
             if self.on_command:

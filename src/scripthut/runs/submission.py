@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from scripthut.backends.slurm import SlurmBackend
 from scripthut.runs.models import Run, RunItem, RunItemStatus
+from scripthut.ssh.transport import ExecutionNotStartedError
 from scripthut.submission import SubmissionAttempt, SubmissionConflict, SubmissionRejected
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ class SubmissionManager:
             # replace succeeded but directory fsync failed.
             item.status = RunItemStatus.SUBMISSION_UNKNOWN
             item.error = attempt.detail = f"Could not persist submission intent: {exc}"
+            attempt.submission_error = item.error
             return None
 
         def accepted(job_id: str, output: str) -> None:
@@ -88,8 +90,30 @@ class SubmissionManager:
             await backend.submit_attempt(script, attempt, accepted)
             await self.check(run, item, backend)
             return True if not item.submission_unresolved else None
+        except ExecutionNotStartedError as exc:
+            # A later verification command may fail to start after sbatch succeeded.
+            attempt.submission_error = str(exc)
+            item.error = attempt.detail = str(exc)
+            if attempt.job_id is not None:
+                item.status = RunItemStatus.SUBMISSION_UNKNOWN
+                try:
+                    self.save(run)
+                except Exception:
+                    pass
+                return None
+            attempt.resolution = "not_submitted"
+            item.status = RunItemStatus.FAILED
+            item.finished_at = datetime.now(UTC)
+            try:
+                self.save(run)
+            except Exception:
+                item.status = RunItemStatus.SUBMISSION_UNKNOWN
+                attempt.resolution = "unknown"
+                return None
+            return False
         except SubmissionRejected as exc:
             attempt.resolution = "rejected"
+            attempt.submission_error = str(exc)
             item.status = RunItemStatus.FAILED
             item.finished_at = datetime.now(UTC)
             item.error = attempt.detail = str(exc)
@@ -103,6 +127,7 @@ class SubmissionManager:
         except (Exception, asyncio.CancelledError) as exc:
             item.status = RunItemStatus.SUBMISSION_UNKNOWN
             item.error = attempt.detail = f"Submission outcome unknown: {exc}"
+            attempt.submission_error = item.error
             try:
                 self.save(run)
             except Exception:
@@ -189,7 +214,49 @@ class SubmissionManager:
             backend = self.manager.get_job_backend(run.backend_name)
             if not isinstance(backend, SlurmBackend):
                 raise SubmissionConflict("Original Slurm backend is unavailable")
-            if action == "retry":
+            if action == "abandon":
+                if not confirm_not_submitted or attempt_id is None:
+                    raise SubmissionConflict(
+                        "Abandon requires an attempt ID and confirmation that no job was submitted"
+                    )
+                client = self.manager.get_ssh_client(run.backend_name)
+                if (
+                    attempt.destination != self.destination(run)
+                    or client is None
+                    or attempt.user != client.user
+                ):
+                    raise SubmissionConflict("Submission destination or user changed")
+                if not self.manager.available(run.backend_name):
+                    raise SubmissionConflict("Backend unavailable; cannot verify scheduler absence")
+                abandon_matches = await self._find_attempt_with_backoff(backend, attempt)
+                if abandon_matches:
+                    raise SubmissionConflict(
+                        "Scheduler reports matching jobs; check or bind instead"
+                    )
+                # A recorded job ID is positive evidence even if accounting was pruned.
+                if attempt.job_id is not None or item.job_id is not None:
+                    raise SubmissionConflict(
+                        "Recorded job ID prevents abandonment; check or bind instead"
+                    )
+                previous_detail = attempt.detail
+                previous_error = item.error
+                previous_finished = item.finished_at
+                attempt.resolution = "not_submitted"
+                attempt.detail = "Operator verified no submission and abandoned this attempt"
+                item.status = RunItemStatus.FAILED
+                item.error = "Submission abandoned after operator and scheduler verification"
+                item.finished_at = datetime.now(UTC)
+                try:
+                    self.save(run)
+                except Exception:
+                    item.status = RunItemStatus.SUBMISSION_UNKNOWN
+                    item.error = previous_error
+                    item.finished_at = previous_finished
+                    attempt.resolution = "unknown"
+                    attempt.detail = previous_detail
+                    raise
+                self.manager._invalidate_observations(run)
+            elif action == "retry":
                 if not confirm_not_submitted:
                     raise SubmissionConflict(
                         "Retry requires explicit confirmation that this attempt submitted no job"
@@ -232,7 +299,9 @@ class SubmissionManager:
                     raise SubmissionConflict(str(exc)) from exc
             else:
                 raise SubmissionConflict("Unknown resolution action")
-            return item.to_dict()
+        if action == "abandon":
+            await self.manager.process_run(run)
+        return item.to_dict()
 
     async def reconcile(self, run: Run) -> None:
         for item in run.items:
