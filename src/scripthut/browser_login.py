@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import secrets
 import shlex
@@ -111,6 +112,44 @@ class LoginManager:
         attempt.deadline = asyncio.create_task(self._expire(attempt, self.config.timeout))
         return attempt
 
+    async def setup(self, backend: str, action: str) -> dict[str, str]:
+        setup = self.config.connection_setup.get(backend)
+        bs = self.app_state.backends.get(backend)
+        if setup is None or bs is None or not bs.enabled:
+            raise HTTPException(404, "Connection setup is unavailable")
+        if action not in ("status", "connect"):
+            raise HTTPException(400, "Unknown connection action")
+        host = self.app_state.backends.get(self.config.host_backend)
+        client = host.ssh_client if host else None
+        if not isinstance(client, SSHClient):
+            raise HTTPException(503, "Verified host transport unavailable")
+        # Only fixed actions and configured paths cross this boundary. Helpers
+        # return status JSON, never authentication transcripts or credentials.
+        try:
+            out, _, code = await client.run_command(
+                shlex.join([setup.helper_path, action]),
+                timeout=20,
+            )
+            value = json.loads(out)
+            phase = value.get("phase")
+            if code or phase not in (
+                "stopped",
+                "starting",
+                "vpn_login_required",
+                "vpn_connecting",
+                "ssh_login_required",
+                "connected",
+                "scheduler_unconfigured",
+            ):
+                raise ValueError("Invalid helper result")
+        except Exception:
+            raise HTTPException(503, "Connection helper unavailable") from None
+        if phase in ("connected", "scheduler_unconfigured"):
+            if not await check_backend_connection(bs, force=True):
+                phase = "ssh_login_required"
+            self.app_state.notify_poll()
+        return {"phase": phase, "desktop_url": setup.desktop_url}
+
     async def _expire(self, attempt: LoginAttempt, timeout: int) -> None:
         await asyncio.sleep(timeout)
         await self.stop(attempt, "timed_out")
@@ -148,7 +187,7 @@ class LoginManager:
             raise HTTPException(503, "Verified host transport unavailable")
         command = shlex.join(
             [
-                self.config.helper_path,
+                self.config.profile_helpers.get(attempt.backend, self.config.helper_path),
                 "--profiles",
                 self.config.profiles_path,
                 self.config.profiles[attempt.backend],
@@ -254,6 +293,7 @@ def make_login_router(state: Any) -> APIRouter:
             owner = secrets.token_urlsafe(32)
             m.sessions[owner] = (secrets.token_urlsafe(32), time.monotonic() + 1800)
         csrf = m.sessions[owner][0]
+        setup_enabled = "true" if backend in m.config.connection_setup else "false"
         content = (
             (ASSETS / "login.html")
             .read_text()
@@ -262,6 +302,7 @@ def make_login_router(state: Any) -> APIRouter:
                 html.escape(backend, quote=True),
             )
             .replace("{{csrf}}", csrf)
+            .replace("{{setup_enabled}}", setup_enabled)
         )
         response = HTMLResponse(
             content,
@@ -284,11 +325,29 @@ def make_login_router(state: Any) -> APIRouter:
         )
         return response
 
+    @router.get("/backend/{backend}/setup")
+    async def setup_status(backend: str, request: Request) -> dict[str, str]:
+        m = manager()
+        m.origin(request, required=False)
+        m.session(request)
+        return await m.setup(backend, "status")
+
+    @router.post("/backend/{backend}/setup")
+    async def setup_connect(backend: str, request: Request) -> dict[str, str]:
+        m = manager()
+        m.origin(request)
+        m.session(request, request.headers.get("x-csrf-token", ""))
+        return await m.setup(backend, "connect")
+
     @router.post("/backend/{backend}/start")
     async def start(backend: str, request: Request) -> dict[str, str]:
         m = manager()
         m.origin(request)
         owner = m.session(request, request.headers.get("x-csrf-token", ""))
+        if backend in m.config.connection_setup:
+            value = await m.setup(backend, "status")
+            if value["phase"] not in ("ssh_login_required", "connected", "scheduler_unconfigured"):
+                raise HTTPException(409, "Complete VPN login first")
         return m.start(owner, backend).public()
 
     @router.get("/attempt/{attempt_id}")

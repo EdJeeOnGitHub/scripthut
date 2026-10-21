@@ -2,9 +2,15 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect {{backend}}</title><link rel="stylesheet" href="/login/assets/login-v1.css">
 <script defer src="/login/assets/login-v1.js"></script></head>
-<body data-backend="{{backend}}" data-csrf="{{csrf}}"><main>
+<body data-backend="{{backend}}" data-csrf="{{csrf}}" data-setup="{{setup_enabled}}"><main>
 <h1>Connect {{backend}}</h1>
 <p>Authenticate with the cluster’s SSH prompts. Input is not echoed. Passwords and terminal output are not saved.</p>
+<section id="setup" hidden>
+<p id="setup-status" role="status">Checking connection…</p>
+<button id="setup-connect" type="button">Connect / Reconnect VPN</button>
+<a id="setup-desktop" target="_blank" rel="noopener noreferrer" hidden>Open VPN login</a>
+<p>Complete VPN login in the separate tab, then authenticate SSH below. This page checks your connection automatically.</p>
+</section>
 <p id="status" role="status">Disconnected</p>
 <div class="controls"><button id="start">Connect</button><button id="cancel" disabled>Cancel</button></div>
 <section id="terminal" tabindex="0" aria-label="SSH authentication terminal">
