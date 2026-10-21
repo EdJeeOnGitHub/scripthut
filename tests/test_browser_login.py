@@ -210,7 +210,9 @@ def test_websocket_origin_session_and_secret_log_exclusion(monkeypatch, caplog):
             ws.close()
             deadline = time.monotonic() + 2
             while client.get(f"/login/attempt/{attempt['id']}").json()["state"] != "cancelled":
-                assert time.monotonic() < deadline, "Websocket disconnect did not cancel authentication"
+                assert time.monotonic() < deadline, (
+                    "Websocket disconnect did not cancel authentication"
+                )
                 time.sleep(0.01)
         assert "VERY_SECRET" not in caplog.text
         assert "Password:" not in caplog.text
@@ -311,3 +313,69 @@ def test_enabled_config_requires_verified_host_and_openssh_targets():
     config["backends"][0]["ssh"]["host"] = "untrusted.example"
     with pytest.raises(ValueError, match="loopback"):
         ScriptHutConfig.model_validate(config)
+
+
+@pytest.mark.asyncio
+async def test_connection_setup_boundary_and_vpn_gate(monkeypatch):
+    from scripthut.login_config import ConnectionSetup
+
+    app, manager, processes, host = application(monkeypatch)
+    manager.config.connection_setup["cluster"] = ConnectionSetup(
+        helper_path="/fixed/setup", desktop_url="https://host.example/vpn"
+    )
+    host.run_command = AsyncMock(return_value=('{"phase":"vpn_login_required"}', "", 0))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=ORIGIN) as client:
+        path = "/login/backend/cluster/setup"
+        assert (await client.get(path)).status_code == 403
+        page = await client.get("/login/backend/cluster")
+        assert 'data-setup="true"' in page.text
+        assert (await client.post(path, headers={"Origin": ORIGIN})).status_code == 403
+        assert (
+            await client.post(
+                path, headers={"Origin": "https://evil.example", "X-CSRF-Token": csrf(page)}
+            )
+        ).status_code == 403
+        headers = {"Origin": ORIGIN, "X-CSRF-Token": csrf(page)}
+        response = await client.post(path, headers=headers)
+        assert response.json()["phase"] == "vpn_login_required"
+        assert host.run_command.call_args.args[0] == "/fixed/setup connect"
+        assert (
+            await client.post("/login/backend/cluster/start", headers=headers)
+        ).status_code == 409
+        host.run_command.return_value = ('{"phase":"ssh_login_required"}', "", 0)
+        response = await client.post("/login/backend/cluster/start", headers=headers)
+        assert response.status_code == 200
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_does_not_relay_helper_errors_or_arbitrary_fields(monkeypatch):
+    from scripthut.login_config import ConnectionSetup
+
+    app, manager, processes, host = application(monkeypatch)
+    manager.config.connection_setup["cluster"] = ConnectionSetup(
+        helper_path="/fixed/setup", desktop_url="https://host.example/vpn"
+    )
+    host.run_command = AsyncMock(return_value=('{"phase":"connected","secret":"hidden"}', "", 0))
+    assert await manager.setup("cluster", "status") == {
+        "phase": "connected",
+        "desktop_url": "https://host.example/vpn",
+    }
+    host.run_command.return_value = ("sensitive diagnostic", "", 1)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await manager.setup("cluster", "status")
+    assert exc.value.detail == "Connection helper unavailable"
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_per_backend_helper_preserves_other_profiles(monkeypatch):
+    app, manager, processes, host = application(monkeypatch)
+    manager.config.profile_helpers["cluster"] = "/fixed/custom-login"
+    attempt = manager.start("owner", "cluster")
+    await manager.attach(attempt)
+    assert host.create_interactive_session.call_args.args[0].startswith("/fixed/custom-login ")
+    await manager.stop(attempt)
+    await manager.close()

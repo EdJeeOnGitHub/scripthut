@@ -7,6 +7,8 @@
     const cancel = document.getElementById('cancel');
     const input = document.getElementById('input');
     const output = document.getElementById('output');
+    const managed = document.body.dataset.setup === 'true';
+    let vpnReady = !managed;
     let socket = null, attempt = null;
     const active = new Set(['waiting', 'authenticating']);
     const labels = {waiting: 'Waiting for terminal', authenticating: 'Authenticating',
@@ -19,15 +21,50 @@
         return response.json();
     }
     function finish(value) {
+        if (attempt) attempt.state = value;
         status.textContent = labels[value] || value;
         input.disabled = !active.has(value);
         cancel.disabled = !active.has(value);
-        start.disabled = active.has(value) || value === 'connected';
+        start.disabled = !vpnReady || active.has(value) || value === 'connected';
         if (!active.has(value)) {output.textContent = ''; input.value = '';}
     }
     function send(data) {
         if (socket && socket.readyState === WebSocket.OPEN && !input.disabled)
             socket.send(JSON.stringify({type: 'input', data}));
+    }
+    if (managed) {
+        const panel = document.getElementById('setup');
+        const label = document.getElementById('setup-status');
+        const connect = document.getElementById('setup-connect');
+        const desktop = document.getElementById('setup-desktop');
+        const phases = {stopped: 'Connection services stopped', starting: 'Starting VPN',
+            vpn_login_required: 'VPN login needed', vpn_connecting: 'VPN connecting',
+            ssh_login_required: 'VPN connected — SSH login needed', connected: 'Connected',
+            scheduler_unconfigured: 'Connected — Slurm account not configured'};
+        panel.hidden = false; start.disabled = true;
+        let pending = false;
+        async function refresh(mutate = false) {
+            if (pending) return;
+            pending = true;
+            try {
+                const value = await request(`/login/backend/${encodeURIComponent(backend)}/setup`, mutate);
+                label.textContent = phases[value.phase];
+                desktop.href = value.desktop_url;
+                desktop.hidden = !['vpn_login_required', 'vpn_connecting'].includes(value.phase);
+                vpnReady = ['ssh_login_required', 'connected', 'scheduler_unconfigured'].includes(value.phase);
+                connect.disabled = vpnReady || value.phase === 'vpn_connecting';
+                if (!attempt || !active.has(attempt.state)) {
+                    start.disabled = !vpnReady || value.phase !== 'ssh_login_required';
+                }
+            } catch (_) {
+                label.textContent = 'Connection status unavailable — retry or refresh';
+                vpnReady = false; start.disabled = true; connect.disabled = false;
+            } finally {pending = false;}
+        }
+        connect.addEventListener('click', () => refresh(true));
+        refresh();
+        const timer = setInterval(() => {if (!document.hidden) refresh();}, 5000);
+        window.addEventListener('pagehide', () => clearInterval(timer));
     }
     start.addEventListener('click', async () => {
         start.disabled = true;

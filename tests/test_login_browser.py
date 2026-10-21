@@ -127,3 +127,40 @@ async def test_second_browser_window_reports_existing_attempt(browser_app):
             assert manager.attempts["cluster"].state == "cancelled"
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_vpn_then_ssh_guided_flow(browser_app):
+    from unittest.mock import AsyncMock
+
+    from scripthut.login_config import ConnectionSetup
+
+    origin, manager, processes = browser_app
+    manager.config.connection_setup["cluster"] = ConnectionSetup(
+        helper_path="/fixed/setup", desktop_url="https://vpn.example/vnc.html"
+    )
+    host = manager.app_state.backends["host"].ssh_client
+    host.run_command = AsyncMock(return_value=('{"phase":"vpn_login_required"}', "", 0))
+    async with playwright.async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.goto(origin + "/login/backend/cluster")
+            await playwright.expect(page.locator("#setup-status")).to_have_text("VPN login needed")
+            await playwright.expect(page.locator("#start")).to_be_disabled()
+            await playwright.expect(page.locator("#setup-desktop")).to_have_attribute(
+                "href", "https://vpn.example/vnc.html"
+            )
+            host.run_command.return_value = ('{"phase":"ssh_login_required"}', "", 0)
+            await page.locator("#setup-connect").click()
+            await playwright.expect(page.locator("#start")).to_be_enabled()
+            await page.locator("#start").click()
+            await playwright.expect(page.locator("#output")).to_contain_text("Password:")
+            host.run_command.return_value = ('{"phase":"scheduler_unconfigured"}', "", 0)
+            processes[0].finish(0)
+            await playwright.expect(page.locator("#status")).to_have_text("Connected")
+            await playwright.expect(page.locator("#setup-status")).to_have_text(
+                "Connected — Slurm account not configured", timeout=10000
+            )
+        finally:
+            await browser.close()
