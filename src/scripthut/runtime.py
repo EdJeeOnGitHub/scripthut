@@ -27,6 +27,7 @@ from scripthut.backends.local import (
 )
 from scripthut.backends.pbs import PBSBackend
 from scripthut.backends.slurm import SlurmBackend
+from scripthut.backends.slurm_polling import SlurmCommandGate
 from scripthut.config_schema import (
     BatchBackendConfig,
     EC2BackendConfig,
@@ -226,7 +227,10 @@ def init_local_backend(
     return backend_state
 
 
-async def init_backend(backend_config: SlurmBackendConfig | PBSBackendConfig) -> BackendState:
+async def init_backend(
+    backend_config: SlurmBackendConfig | PBSBackendConfig,
+    command_gate: SlurmCommandGate | None = None,
+) -> BackendState:
     """Initialize an SSH-based backend connection (Slurm or PBS)."""
     ssh_client = create_ssh_client(backend_config.ssh)
 
@@ -239,6 +243,11 @@ async def init_backend(backend_config: SlurmBackendConfig | PBSBackendConfig) ->
             ssh_client,
             account=backend_config.account,
             qos=backend_config.qos,
+            command_gate=command_gate or SlurmCommandGate(
+                backend_config.scheduler_min_interval,
+                backend_config.scheduler_query_cache_seconds,
+            ),
+            poll_cluster_info=backend_config.poll_cluster_info,
             partition_map=backend_config.partition_map,
             default_partition=backend_config.default_partition,
         )
@@ -338,9 +347,20 @@ async def init_runtime(
     # SSH backends connect concurrently — one slow or unreachable cluster
     # shouldn't stack its handshake/timeout on top of the others'.
     ssh_configs = [*config.slurm_backends, *config.pbs_backends]
-    ssh_states = await asyncio.gather(
-        *(init_backend(c) for c in ssh_configs)
-    )
+    gates: dict[tuple[str, int, str], SlurmCommandGate] = {}
+    for c in config.slurm_backends:
+        key = (c.ssh.host.lower(), c.ssh.port, c.ssh.user)
+        gate = gates.setdefault(key, SlurmCommandGate())
+        # Aliases cannot weaken an endpoint's configured budget.
+        gate.min_interval = max(gate.min_interval, c.scheduler_min_interval)
+        gate.query_cache_seconds = max(
+            gate.query_cache_seconds, c.scheduler_query_cache_seconds,
+        )
+    ssh_states = await asyncio.gather(*(
+        init_backend(c, command_gate=gates[(c.ssh.host.lower(), c.ssh.port, c.ssh.user)])
+        if isinstance(c, SlurmBackendConfig) else init_backend(c)
+        for c in ssh_configs
+    ))
     for backend_state in ssh_states:
         backends[backend_state.name] = backend_state
 

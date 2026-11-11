@@ -120,7 +120,7 @@ async def test_sbatch_receives_script_as_stdin():
     accepted = []
     script = "#!/bin/bash\n" + "# λ\n" * 600000
     await backend.submit_attempt(script, attempt, lambda *args: accepted.append(args))
-    ssh.run_command.assert_awaited_once_with("sbatch --job-name=task--sh-id", input=script)
+    ssh.run_command.assert_awaited_once_with("sbatch --job-name=task--sh-id", timeout=30, input=script)
     assert accepted[0][0] == "42"
 
 

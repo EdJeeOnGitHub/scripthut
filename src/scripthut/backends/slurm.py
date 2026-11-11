@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from scripthut.reports.resources import slurm_resources
-
 from scripthut.backends.base import (
     ClusterInfo,
     DiskInfo,
@@ -21,6 +19,7 @@ from scripthut.backends.base import (
     QuotaInfo,
     SubmitResult,
 )
+from scripthut.backends.slurm_polling import SlurmCommandGate
 from scripthut.backends.utils import (
     fetch_disk_info,
     fetch_log_via_ssh,
@@ -31,6 +30,7 @@ from scripthut.backends.utils import (
     parse_rss_to_bytes,
 )
 from scripthut.models import JobState, SlurmJob
+from scripthut.reports.resources import slurm_resources
 from scripthut.ssh.transport import ExecutionClient, TransportError
 from scripthut.submission import SubmissionAttempt, SubmissionRejected
 
@@ -316,6 +316,8 @@ class SlurmBackend(JobBackend):
         partition_map: dict[str, str] | None = None,
         default_partition: str | None = None,
         qos: str | None = None,
+        command_gate: SlurmCommandGate | None = None,
+        poll_cluster_info: bool = True,
     ) -> None:
         """Initialize with an SSH client connected to the Slurm head node.
 
@@ -331,10 +333,21 @@ class SlurmBackend(JobBackend):
         through unchanged.
         """
         self._ssh = ssh_client
+        self._command_gate = command_gate or SlurmCommandGate()
+        self._poll_cluster_info = poll_cluster_info
         self._account = account
         self._qos = qos
         self._partition_map = partition_map or {}
         self._default_partition = default_partition
+
+    async def _run_scheduler_command(
+        self, command: str, timeout: int = 30, *, input: str | None = None,
+        cache_queue: bool = False,
+    ) -> tuple[str, str, int]:
+        return await self._command_gate.run(
+            self._ssh, command, timeout=timeout, input=input, cache_queue=cache_queue,
+            mutation=command.startswith(("sbatch ", "scancel ")),
+        )
 
     def _resolve_partition(self, task_partition: str) -> str:
         """Translate a task's logical partition to this cluster's name."""
@@ -365,7 +378,7 @@ class SlurmBackend(JobBackend):
         if user:
             cmd += f" --user={user}"
 
-        stdout, stderr, exit_code = await self._ssh.run_command(cmd)
+        stdout, stderr, exit_code = await self._run_scheduler_command(cmd, cache_queue=True)
 
         if exit_code != 0:
             logger.error(f"squeue failed (exit {exit_code}): {stderr}")
@@ -395,7 +408,7 @@ class SlurmBackend(JobBackend):
         if user:
             cmd += f" --user={user}"
         try:
-            stdout, _, exit_code = await self._ssh.run_command(cmd, timeout=30)
+            stdout, _, exit_code = await self._run_scheduler_command(cmd, timeout=30)
         except Exception as e:
             logger.warning(f"sacct ID pre-check failed: {e}")
             return None
@@ -467,7 +480,7 @@ class SlurmBackend(JobBackend):
         )
 
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=30)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=30)
         except Exception as e:
             logger.warning(f"sacct command failed: {e}")
             raise TransportError(f"sacct command failed: {e}") from e
@@ -629,6 +642,8 @@ class SlurmBackend(JobBackend):
         login points ``squeue``/``sshare`` at the wrong account and reports
         all-zero usage even while our jobs are running.
         """
+        if not self._poll_cluster_info:
+            return None
         partitions = await self._fetch_partitions()
         if partitions is None:
             return None
@@ -665,7 +680,7 @@ class SlurmBackend(JobBackend):
         fmt = "%P|%a|%C|%D|%m|%l|%f"
         cmd = f"sinfo --noheader --summarize --format='{fmt}'"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"sinfo failed: {e}")
             return None
@@ -761,7 +776,7 @@ class SlurmBackend(JobBackend):
         fmt = "Partition:32,StateLong:16,CPUsState:20,FreeMem:14,Gres:256,GresUsed:256"
         cmd = f"sinfo --noheader --Node --Format='{fmt}'"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"sinfo -N (nodes) failed: {e}")
             return {}
@@ -862,7 +877,7 @@ class SlurmBackend(JobBackend):
         if self._account:
             cmd += f" --account={self._account}"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"squeue AllocTRES failed: {e}")
             return None
@@ -897,7 +912,7 @@ class SlurmBackend(JobBackend):
         if self._account:
             cmd += f" -A {self._account}"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"sshare failed: {e}")
             return None
@@ -943,7 +958,7 @@ class SlurmBackend(JobBackend):
         if self._account:
             cmd += f" account={self._account}"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"sacctmgr failed: {e}")
             return None
@@ -994,7 +1009,7 @@ class SlurmBackend(JobBackend):
         """Tally ``squeue -t PD`` pending jobs by reason."""
         cmd = "squeue --noheader -t PD --format='%R'"
         try:
-            stdout, stderr, exit_code = await self._ssh.run_command(cmd, timeout=15)
+            stdout, stderr, exit_code = await self._run_scheduler_command(cmd, timeout=15)
         except Exception as e:
             logger.warning(f"squeue PD failed: {e}")
             return {}
@@ -1026,7 +1041,7 @@ class SlurmBackend(JobBackend):
     async def is_available(self) -> bool:
         """Check if Slurm is available by running squeue --version."""
         try:
-            stdout, _, exit_code = await self._ssh.run_command("squeue --version")
+            stdout, _, exit_code = await self._run_scheduler_command("squeue --version")
             return exit_code == 0 and "slurm" in stdout.lower()
         except Exception as e:
             logger.warning(f"Slurm availability check failed: {e}")
@@ -1054,7 +1069,7 @@ class SlurmBackend(JobBackend):
         # ``'\''`` sequences and corrupt any command containing a single quote
         # (e.g. an agent's ``tmux new-session -d -s "$S" '...'``).
         submit_cmd = f"sbatch <<'SCRIPTHUT_EOF'\n{script}\nSCRIPTHUT_EOF"
-        stdout, stderr, exit_code = await self._ssh.run_command(submit_cmd)
+        stdout, stderr, exit_code = await self._run_scheduler_command(submit_cmd)
         combined = format_submit_output(stdout, stderr)
 
         if exit_code != 0:
@@ -1083,7 +1098,7 @@ class SlurmBackend(JobBackend):
     async def _verify_job_accepted(self, job_id: str) -> bool:
         """Return True if Slurm recognizes ``job_id`` in squeue or sacct."""
         try:
-            stdout, _, exit_code = await self._ssh.run_command(
+            stdout, _, exit_code = await self._run_scheduler_command(
                 f"squeue --noheader --jobs={job_id} --format=%i", timeout=15
             )
         except Exception as e:
@@ -1094,7 +1109,7 @@ class SlurmBackend(JobBackend):
             return True
 
         try:
-            stdout, _, exit_code = await self._ssh.run_command(
+            stdout, _, exit_code = await self._run_scheduler_command(
                 f"sacct --noheader --parsable2 --format=JobIDRaw --jobs={job_id}",
                 timeout=15,
             )
@@ -1124,7 +1139,7 @@ class SlurmBackend(JobBackend):
     ) -> SubmitResult:
         """Submit once, persisting the returned ID before any verification query."""
         command = f"sbatch --job-name={shlex.quote(attempt.scheduler_name)}"
-        stdout, stderr, code = await self._ssh.run_command(command, input=script)
+        stdout, stderr, code = await self._run_scheduler_command(command, input=script)
         output = format_submit_output(stdout, stderr)
         match = _SBATCH_JOB_ID_RE.search(stdout) or _SBATCH_JOB_ID_RE.search(stderr)
         if match:
@@ -1150,7 +1165,7 @@ class SlurmBackend(JobBackend):
         ]
         matches: set[str] = set()
         for command in commands:
-            stdout, stderr, code = await self._ssh.run_command(command)
+            stdout, stderr, code = await self._run_scheduler_command(command)
             if code:
                 raise TransportError(f"Submission reconciliation query failed: {stderr}")
             for line in stdout.splitlines():
@@ -1166,7 +1181,7 @@ class SlurmBackend(JobBackend):
 
     async def cancel_job(self, job_id: str) -> None:
         """Cancel a Slurm job via scancel."""
-        _, stderr, code = await self._ssh.run_command(f"scancel {shlex.quote(job_id)}")
+        _, stderr, code = await self._run_scheduler_command(f"scancel {shlex.quote(job_id)}")
         if code:
             raise RuntimeError(f"scancel failed: {stderr}")
 

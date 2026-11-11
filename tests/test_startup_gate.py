@@ -74,14 +74,17 @@ class TestStartupGateMiddleware:
 
 class TestInitRuntimePhases:
     @pytest.mark.asyncio
-    async def test_reports_phases_and_gathers_ssh_backends(self, tmp_path: Path):
+    @pytest.mark.parametrize("same_endpoint", [False, True])
+    async def test_reports_phases_and_gathers_ssh_backends(self, tmp_path: Path, same_endpoint):
         config = ScriptHutConfig(
             backends=[
                 SlurmBackendConfig(
                     name="a", ssh=SSHConfig(host="a.example", user="u"),
+                    scheduler_min_interval=60,
                 ),
                 SlurmBackendConfig(
-                    name="b", ssh=SSHConfig(host="b.example", user="u"),
+                    name="b", ssh=SSHConfig(host="A.EXAMPLE" if same_endpoint else "b.example", user="u"),
+                    scheduler_min_interval=30,
                 ),
             ],
             settings=GlobalSettings(data_dir=tmp_path),
@@ -100,10 +103,14 @@ class TestInitRuntimePhases:
         phases: list[str] = []
         with patch(
             "scripthut.runtime.init_backend",
-            new=AsyncMock(side_effect=lambda c: fake_state(c)),
+            new=AsyncMock(side_effect=lambda c, **kw: fake_state(c)),
         ) as init_mock:
             runtime = await init_runtime(config, on_phase=phases.append)
 
         assert phases == ["connecting backends", "restoring runs"]
         assert list(runtime.backends) == ["a", "b"]
         assert init_mock.await_count == 2
+        first, second = (call.kwargs["command_gate"] for call in init_mock.await_args_list)
+        assert (first is second) == same_endpoint
+        assert first.min_interval == 60
+        assert second.min_interval == (60 if same_endpoint else 30)

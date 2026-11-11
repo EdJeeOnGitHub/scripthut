@@ -196,6 +196,18 @@ class SlurmBackendConfig(BaseModel):
     name: str = Field(description="Unique identifier for this backend")
     type: Literal["slurm"] = "slurm"
     ssh: SSHConfig = Field(description="SSH connection settings")
+    scheduler_min_interval: int = Field(
+        default=0, ge=0,
+        description="Minimum seconds between Slurm commands, shared by SSH host/port/user",
+    )
+    scheduler_query_cache_seconds: int = Field(
+        default=0, ge=0,
+        description="Reuse identical job-list queries across aliases for this many seconds",
+    )
+    poll_cluster_info: bool = Field(
+        default=True,
+        description="Poll capacity and quota automatically; disable to conserve scheduler RPCs",
+    )
     account: str | None = Field(
         default=None,
         description="Slurm account to charge jobs to (e.g., phd, pi-faculty)",
