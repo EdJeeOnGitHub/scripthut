@@ -230,7 +230,13 @@ class LoginHelper:
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
             try:
-                tty.setraw(slave)
+                # SSH reads passwords using the terminal's line discipline.
+                # Keep canonical editing (erase/kill), but suppress echo before
+                # any input can arrive. Raw mode makes Backspace a password byte.
+                attrs = termios.tcgetattr(slave)
+                attrs[3] |= termios.ICANON
+                attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+                termios.tcsetattr(slave, termios.TCSANOW, attrs)
                 if original is not None:
                     tty.setraw(0)
                 for signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT, signal.SIGALRM):

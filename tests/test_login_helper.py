@@ -298,3 +298,16 @@ async def test_cancel_after_fork_before_verification_removes_owned_master(host):
         assert not socket.exists()
     finally:
         gate.set()
+
+
+async def test_password_backspace_edits_input(host):
+    start, socket, seen, _ = host
+    child = await start()
+    output = await prompt(child)
+    child.stdin.write((SECRET + "x\x7f\n").encode())
+    await child.stdin.drain()
+    assert await asyncio.wait_for(child.wait(), 5) == 0
+    output += await child.stdout.read()
+    assert SECRET.encode() not in output
+    assert socket.exists()
+    assert seen["auth"] == 1
