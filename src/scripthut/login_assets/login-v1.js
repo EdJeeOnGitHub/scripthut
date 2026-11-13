@@ -7,6 +7,23 @@
     const cancel = document.getElementById('cancel');
     const input = document.getElementById('input');
     const output = document.getElementById('output');
+    // Local feedback only: never retain or render the authentication text.
+    const feedback = document.createElement('div');
+    feedback.setAttribute('aria-hidden', 'true');
+    input.insertAdjacentElement('afterend', feedback);
+    let typedCount = 0;
+    function clearFeedback() {
+        typedCount = 0;
+        feedback.textContent = '';
+    }
+    function updateFeedback(data) {
+        for (const char of data) {
+            if ('\r\n\x03\x04\x15\x17\x1b'.includes(char)) typedCount = 0;
+            else if (char === '\x7f' || char === '\b') typedCount = Math.max(0, typedCount - 1);
+            else if (char >= ' ' && char !== '\x7f') typedCount += 1;
+        }
+        feedback.textContent = '*'.repeat(Math.min(typedCount, 256));
+    }
     const managed = document.body.dataset.setup === 'true';
     let vpnReady = !managed;
     let socket = null, attempt = null;
@@ -26,11 +43,13 @@
         input.disabled = !active.has(value);
         cancel.disabled = !active.has(value);
         start.disabled = !vpnReady || active.has(value) || value === 'connected';
-        if (!active.has(value)) {output.textContent = ''; input.value = '';}
+        if (!active.has(value)) {clearFeedback(); output.textContent = ''; input.value = '';}
     }
     function send(data) {
-        if (socket && socket.readyState === WebSocket.OPEN && !input.disabled)
+        if (socket && socket.readyState === WebSocket.OPEN && !input.disabled) {
             socket.send(JSON.stringify({type: 'input', data}));
+            updateFeedback(data);
+        }
     }
     if (managed) {
         const panel = document.getElementById('setup');
@@ -68,6 +87,7 @@
     }
     start.addEventListener('click', async () => {
         start.disabled = true;
+        clearFeedback();
         output.textContent = '';
         try {
             attempt = await request(`/login/backend/${encodeURIComponent(backend)}/start`, true);
@@ -95,6 +115,7 @@
                 }
             };
             socket.onclose = async () => {
+                clearFeedback();
                 input.disabled = true; input.value = ''; output.textContent = '';
                 try {finish((await request(`/login/attempt/${attempt.id}`)).state);}
                 catch (_) {finish('failed');}
@@ -126,6 +147,7 @@
         event.preventDefault(); send(event.clipboardData.getData('text')); input.value = '';
     });
     window.addEventListener('pagehide', () => {
+        clearFeedback();
         input.value = ''; output.textContent = ''; if (socket) socket.close();
     });
 })();
