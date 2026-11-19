@@ -20,6 +20,7 @@ import asyncssh
 from scripthut.backends.base import JobBackend
 from scripthut.backends.batch import BatchBackend
 from scripthut.backends.ec2 import EC2Backend
+from scripthut.backends.vast import VastBackend
 from scripthut.backends.local import (
     LocalBackend,
     LocalExecClient,
@@ -31,6 +32,7 @@ from scripthut.backends.slurm_polling import SlurmCommandGate
 from scripthut.config_schema import (
     BatchBackendConfig,
     EC2BackendConfig,
+    VastBackendConfig,
     LocalBackendConfig,
     PBSBackendConfig,
     ScriptHutConfig,
@@ -157,6 +159,19 @@ async def init_ec2_backend(
             error=f"Subnet '{backend_config.subnet_id}' not reachable",
         )
     return backend_state
+
+
+async def init_vast_backend(config: VastBackendConfig, state_root: Path) -> BackendState:
+    backend = VastBackend(config, state_root)
+    try:
+        connected = await backend.is_available()
+        status = ConnectionStatus(connected=connected, host="vast.ai")
+    except Exception as exc:
+        status = ConnectionStatus(connected=False, host="vast.ai", error=str(exc))
+    return BackendState(
+        name=config.name, backend_type="vast", ssh_client=None, backend=backend,
+        status=status, clone_dir="",
+    )
 
 
 async def init_batch_backend(backend_config: BatchBackendConfig) -> BackendState:
@@ -375,6 +390,10 @@ async def init_runtime(
     ec2_archive_root = config.settings.data_dir_resolved / "ec2-logs"
     for ec2_config in config.ec2_backends:
         backends[ec2_config.name] = await init_ec2_backend(ec2_config, ec2_archive_root)
+
+    for vast_config in config.vast_backends:
+        state_root = config.settings.data_dir_resolved / "vast-jobs"
+        backends[vast_config.name] = await init_vast_backend(vast_config, state_root)
 
     run_storage = RunStorageManager(config.settings.data_dir_resolved / "workflows")
     usage_log = UsageLog(config.settings.data_dir_resolved / "usage.jsonl")

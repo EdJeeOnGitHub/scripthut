@@ -546,8 +546,57 @@ class EC2BackendConfig(BaseModel):
     )
 
 
+class VastOfferProfile(BaseModel):
+    """Marketplace bounds for a ScriptHut partition."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    gpu_names: list[str] = Field(min_length=1)
+    max_hourly_usd: float = Field(gt=0)
+    disk_gb: int = Field(default=30, ge=10)
+    min_reliability: float = Field(default=0.98, ge=0, le=1)
+
+
+class VastBackendConfig(BaseModel):
+    """On-demand Vast marketplace rentals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["vast"] = "vast"
+    name: str
+    api_key_env: str = Field(default="VAST_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    api_key_file: Path | None = None
+    ssh_identity_file: str
+    ssh_known_hosts_file: str | None = None
+    ssh_trust_on_first_use: bool = False
+    input_root: Path | None = None
+    rental_namespace: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")
+    profiles: dict[str, VastOfferProfile] = Field(min_length=1)
+    default_profile: str = "default"
+    default_image: str | None = None
+    max_instances: int = Field(default=1, ge=1)
+    startup_timeout_seconds: int = Field(default=600, ge=1)
+    collection_timeout_seconds: int = Field(default=300, ge=1)
+    env: list[EnvRule] = Field(default_factory=list)
+    env_groups: dict[str, list[EnvRule]] = Field(default_factory=dict)
+
+    @property
+    def max_concurrent(self) -> int:
+        """Use the same limit for task scheduling and marketplace rentals."""
+        return self.max_instances
+
+    @model_validator(mode="after")
+    def validate_default_profile(self) -> "VastBackendConfig":
+        if self.default_profile not in self.profiles:
+            raise ValueError("default_profile must name a configured Vast offer profile")
+        if bool(self.ssh_known_hosts_file) == self.ssh_trust_on_first_use:
+            raise ValueError("Set one Vast SSH trust method: known hosts or trust on first use")
+        return self
+
+
 BackendConfig = Annotated[
-    SlurmBackendConfig | PBSBackendConfig | LocalBackendConfig | ECSBackendConfig | BatchBackendConfig | EC2BackendConfig,
+    SlurmBackendConfig | PBSBackendConfig | LocalBackendConfig | ECSBackendConfig
+    | BatchBackendConfig | EC2BackendConfig | VastBackendConfig,
     Field(discriminator="type"),
 ]
 
@@ -1027,6 +1076,13 @@ class ScriptHutConfig(BaseModel):
         description="Task-level result cache backed by an object store (S3/rclone)",
     )
 
+    @model_validator(mode="after")
+    def validate_vast_namespaces(self) -> "ScriptHutConfig":
+        namespaces = [backend.rental_namespace for backend in self.vast_backends]
+        if len(set(namespaces)) != len(namespaces):
+            raise ValueError("Vast backends must use distinct rental namespaces")
+        return self
+
     def get_backend(self, name: str) -> BackendConfig | None:
         """Get a backend by name."""
         for backend in self.backends:
@@ -1077,3 +1133,8 @@ class ScriptHutConfig(BaseModel):
     def ec2_backends(self) -> list[EC2BackendConfig]:
         """Get all AWS EC2-direct backends."""
         return [c for c in self.backends if isinstance(c, EC2BackendConfig)]
+
+    @property
+    def vast_backends(self) -> list[VastBackendConfig]:
+        """Get all Vast marketplace backends."""
+        return [c for c in self.backends if isinstance(c, VastBackendConfig)]

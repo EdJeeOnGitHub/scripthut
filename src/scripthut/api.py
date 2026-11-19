@@ -24,6 +24,7 @@ from scripthut.config_schema import (
     LocalBackendConfig,
     PBSBackendConfig,
     SlurmBackendConfig,
+    VastBackendConfig,
 )
 from scripthut.runs.models import Run, RunItemStatus
 from scripthut.runs.request_journal import RequestBusy, RequestConflict, RequestJournal
@@ -48,6 +49,8 @@ def _backend_kind(cfg: Any) -> str:
         return "batch"
     if isinstance(cfg, EC2BackendConfig):
         return "ec2"
+    if isinstance(cfg, VastBackendConfig):
+        return "vast"
     if isinstance(cfg, ECSBackendConfig):
         return "ecs"
     return "unknown"
@@ -1023,6 +1026,7 @@ def make_api_router(state: AppState) -> APIRouter:
         from scripthut.config_schema import (
             PBSBackendConfig,
             SlurmBackendConfig,
+    VastBackendConfig,
         )
         if state.config is None:
             return None
