@@ -20,6 +20,7 @@ class Marketplace:
         self.instances = []
         self.creates = 0
         self.destroy_error = False
+        self.destroy_delayed = False
 
     async def list_instances(self):
         return self.instances.copy()
@@ -39,7 +40,8 @@ class Marketplace:
         assert instance_id == "712"
         if self.destroy_error:
             raise httpx.ReadTimeout("destroy response lost")
-        self.instances.clear()
+        if not self.destroy_delayed:
+            self.instances.clear()
 
 
 @pytest.fixture
@@ -109,7 +111,11 @@ async def test_cleanup_retries_after_durable_output_collection(backend_factory):
     assert len(await backend.get_jobs()) == 1
     assert await backend.get_job_stats([result.job_id]) == {}
     market.destroy_error = False
+    market.destroy_delayed = True
     restarted = make_backend()
+    assert len(await restarted.get_jobs()) == 1
+    assert await restarted.get_job_stats([result.job_id]) == {}
+    market.destroy_delayed = False
     assert await restarted.get_jobs() == []
     assert market.instances == []
     assert (await restarted.get_job_stats([result.job_id]))[result.job_id].state == "COMPLETED"

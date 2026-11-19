@@ -381,17 +381,23 @@ class VastBackend(JobBackend):
                 raise ValueError("Vast did not return a regular log file")
             log.replace(directory / "output.log")
 
-    async def _finish(self, job_id: str, record: dict[str, Any]) -> None:
+    async def _finish(self, job_id: str, record: dict[str, Any]) -> bool:
         if instance_id := record.get("instance"):
-            await self.api.destroy_instance(instance_id)
+            api = self.api
+            await api.destroy_instance(instance_id)
+            instances = await api.list_instances()
+            if any(str(instance["id"]) == instance_id for instance in instances):
+                return False
         record.update(state=record["finishing"], finished=time.time())
         self._save(job_id, record)
         (self._directory(job_id) / "task.sh").unlink(missing_ok=True)
+        return True
 
     async def get_jobs(self, user: str | None = None) -> list[HPCJob]:
         async with self.lock:
             instances = await self.api.list_instances()
             by_label = {instance.get("label"): instance for instance in instances}
+            by_id = {str(instance["id"]): instance for instance in instances}
             active = []
             for job_id, record in self._records().items():
                 if record.get("state"):
@@ -399,8 +405,9 @@ class VastBackend(JobBackend):
                     if not record.get("instance") and (late := by_label.get(record["label"])):
                         await self.api.destroy_instance(str(late["id"]))
                     continue
-                instance = by_label.get(record["label"])
-                if instance and not record.get("instance"):
+                instance_id = record.get("instance")
+                instance = by_id.get(instance_id) if instance_id else by_label.get(record["label"])
+                if instance and not instance_id:
                     record["instance"] = str(instance["id"])
                     self._save(job_id, record)
                 try:
@@ -426,8 +433,8 @@ class VastBackend(JobBackend):
                                 await self._observe(job_id, record, instance)
                     if record.get("finishing"):
                         self._save(job_id, record)
-                        await self._finish(job_id, record)
-                        continue
+                        if await self._finish(job_id, record):
+                            continue
                 except (OSError, asyncssh.Error, RuntimeError, httpx.HTTPError,
                         ValueError, KeyError, TypeError) as exc:
                     logger.warning("Vast job %s will retry after %s", job_id, type(exc).__name__)
