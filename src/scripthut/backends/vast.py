@@ -367,7 +367,10 @@ class VastBackend(JobBackend):
                     for index, pattern in enumerate(record["outputs"]):
                         target = outputs / f"declared-{index}"
                         target.mkdir()
-                        for match in await sftp.glob(f"{working_dir}/{pattern}"):
+                        matches = await sftp.glob(f"{working_dir}/{pattern}")
+                        if not matches:
+                            raise ValueError(f"Vast output pattern did not match: {pattern}")
+                        for match in matches:
                             name = Path(match).name
                             if not name or name in (".", "..") or "\0" in name:
                                 raise ValueError("Invalid filename from Vast output glob")

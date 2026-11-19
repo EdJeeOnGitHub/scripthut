@@ -1071,6 +1071,13 @@ class ScriptHutConfig(BaseModel):
         description="Task-level result cache backed by an object store (S3/rclone)",
     )
 
+    @model_validator(mode="after")
+    def validate_vast_namespaces(self) -> "ScriptHutConfig":
+        namespaces = [backend.rental_namespace for backend in self.vast_backends]
+        if len(set(namespaces)) != len(namespaces):
+            raise ValueError("Vast backends must use distinct rental namespaces")
+        return self
+
     def get_backend(self, name: str) -> BackendConfig | None:
         """Get a backend by name."""
         for backend in self.backends:

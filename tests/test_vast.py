@@ -1,5 +1,8 @@
 """Exercise rental ownership across retries and process restarts."""
 
+import asyncio
+
+import asyncssh
 import httpx
 import pytest
 
@@ -113,7 +116,6 @@ async def test_cleanup_retries_after_durable_output_collection(backend_factory):
 
 @pytest.mark.asyncio
 async def test_first_use_pin_survives_restart(backend_factory, monkeypatch):
-    import asyncssh
 
     market, make_backend = backend_factory
     backend = make_backend()
@@ -142,3 +144,66 @@ async def test_first_use_pin_survives_restart(backend_factory, monkeypatch):
     assert await restarted._known_hosts(
         result.job_id, record, "test.host", 2200
     ) == ([key], [], [])
+
+
+async def test_task_execution_over_ssh(tmp_path, backend_factory, monkeypatch):
+    market, make_backend = backend_factory
+    remote = tmp_path / "worker"
+    monkeypatch.setattr("scripthut.backends.vast.REMOTE", str(remote))
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "data.txt").write_text("staged input\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    host_key = asyncssh.generate_private_key("ssh-ed25519")
+    identity = tmp_path / "identity"
+    key.write_private_key(str(identity))
+    authorized = tmp_path / "authorized"
+    authorized.write_bytes(key.export_public_key())
+    known = tmp_path / "known_hosts"
+
+    async def run_command(process):
+        child = await asyncio.create_subprocess_shell(
+            process.command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await child.communicate()
+        process.stdout.write(stdout.decode())
+        process.stderr.write(stderr.decode())
+        process.exit(child.returncode)
+
+    async with asyncssh.listen(
+        "127.0.0.1", 0, server_host_keys=[host_key],
+        authorized_client_keys=str(authorized), process_factory=run_command,
+        sftp_factory=asyncssh.SFTPServer,
+    ) as worker:
+        port = worker.get_port()
+        known.write_text(f"[127.0.0.1]:{port} {host_key.export_public_key().decode()}")
+        backend = make_backend()
+        backend.config = backend.config.model_copy(update={
+            "input_root": inputs, "ssh_identity_file": str(identity),
+            "ssh_known_hosts_file": str(known),
+        })
+        task = TaskDefinition(
+            id="task", name="Task", working_dir=str(work), inputs=["data.txt"],
+            outputs=["*.txt"], time_limit="00:10",
+            command='cp "$SCRIPTHUT_INPUT_DIR/data.txt" result.txt; '
+                    'cp result.txt "$SCRIPTHUT_OUTPUT_DIR/copied.txt"; cat result.txt',
+        )
+        env = {"SCRIPTHUT_RUN_ID": "run"}
+        script = backend.generate_script(task, "run", "", env_vars=env)
+        result = await backend.submit_task(task, script, env)
+        market.instances[0].update(
+            actual_status="running", public_ipaddr="127.0.0.1",
+            ports={"22/tcp": [{"HostPort": str(port)}]},
+        )
+        async with asyncio.timeout(5):
+            while await backend.get_jobs():
+                await asyncio.sleep(0.05)
+        assert not market.instances
+        assert (await backend.get_job_stats([result.job_id]))[result.job_id].state == "COMPLETED"
+        output = backend._directory(result.job_id) / "outputs"
+        assert (output / "copied.txt").read_text() == "staged input\n"
+        assert (output / "declared-0" / "result.txt").read_text() == "staged input\n"
+        log, error = await backend.fetch_log(result.job_id, "")
+        assert error is None and "staged input" in log
