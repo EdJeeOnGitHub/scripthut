@@ -580,6 +580,11 @@ class VastBackendConfig(BaseModel):
     env: list[EnvRule] = Field(default_factory=list)
     env_groups: dict[str, list[EnvRule]] = Field(default_factory=dict)
 
+    @property
+    def max_concurrent(self) -> int:
+        """Use the same limit for task scheduling and marketplace rentals."""
+        return self.max_instances
+
     @model_validator(mode="after")
     def validate_default_profile(self) -> "VastBackendConfig":
         if self.default_profile not in self.profiles:

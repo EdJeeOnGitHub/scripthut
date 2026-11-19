@@ -5,10 +5,14 @@ import asyncio
 import asyncssh
 import httpx
 import pytest
+from fastapi import FastAPI
 
+from scripthut import main
+from scripthut.api import make_api_router
 from scripthut.backends.vast import VastBackend
 from scripthut.config_schema import ScriptHutConfig
-from scripthut.runs.models import TaskDefinition
+from scripthut.runs.models import RunItemStatus, TaskDefinition
+from scripthut.runtime import init_runtime
 
 
 class Marketplace:
@@ -146,7 +150,7 @@ async def test_first_use_pin_survives_restart(backend_factory, monkeypatch):
     ) == ([key], [], [])
 
 
-async def test_task_execution_over_ssh(tmp_path, backend_factory, monkeypatch):
+async def test_submit_api_runs_vast_task_over_ssh(tmp_path, backend_factory, monkeypatch):
     market, make_backend = backend_factory
     remote = tmp_path / "worker"
     monkeypatch.setattr("scripthut.backends.vast.REMOTE", str(remote))
@@ -179,31 +183,50 @@ async def test_task_execution_over_ssh(tmp_path, backend_factory, monkeypatch):
     ) as worker:
         port = worker.get_port()
         known.write_text(f"[127.0.0.1]:{port} {host_key.export_public_key().decode()}")
-        backend = make_backend()
-        backend.config = backend.config.model_copy(update={
-            "input_root": inputs, "ssh_identity_file": str(identity),
-            "ssh_known_hosts_file": str(known),
+        config = ScriptHutConfig.model_validate({
+            "backends": [make_backend().config.model_dump() | {
+                "input_root": inputs, "ssh_identity_file": str(identity),
+                "ssh_known_hosts_file": str(known),
+            }],
+            "settings": {"data_dir": str(tmp_path / "controller")},
         })
-        task = TaskDefinition(
-            id="task", name="Task", working_dir=str(work), inputs=["data.txt"],
-            outputs=["*.txt"], time_limit="00:10",
-            command='cp "$SCRIPTHUT_INPUT_DIR/data.txt" result.txt; '
-                    'cp result.txt "$SCRIPTHUT_OUTPUT_DIR/copied.txt"; cat result.txt',
+        runtime = await init_runtime(config, restore_runs=False)
+        state = main.AppState(
+            config=config, backends=runtime.backends,
+            run_manager=runtime.run_manager, run_storage=runtime.run_storage,
         )
-        env = {"SCRIPTHUT_RUN_ID": "run"}
-        script = backend.generate_script(task, "run", "", env_vars=env)
-        result = await backend.submit_task(task, script, env)
+        monkeypatch.setattr(main, "state", state)
+        app = FastAPI()
+        app.include_router(make_api_router(state))
+        body = {
+            "backend": "vast-gpu",
+            "task": {
+                "id": "task", "name": "Task", "project_id": "vast-test",
+                "working_dir": str(work), "inputs": ["data.txt"],
+                "outputs": ["*.txt"], "time_limit": "00:10",
+                "command": 'cp "$SCRIPTHUT_INPUT_DIR/data.txt" result.txt; '
+                           'cp result.txt "$SCRIPTHUT_OUTPUT_DIR/copied.txt"; cat result.txt',
+            },
+        }
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.post("/api/v1/tasks/run", json=body)
+        assert response.is_success, response.text
+        run_id = response.json()["id"]
+        item = runtime.run_manager.runs[run_id].items[0]
+        assert item.status == RunItemStatus.SUBMITTED
         market.instances[0].update(
             actual_status="running", public_ipaddr="127.0.0.1",
             ports={"22/tcp": [{"HostPort": str(port)}]},
         )
         async with asyncio.timeout(5):
-            while await backend.get_jobs():
+            while item.status != RunItemStatus.COMPLETED:
+                await main.poll_backend(runtime.backends["vast-gpu"])
                 await asyncio.sleep(0.05)
         assert not market.instances
-        assert (await backend.get_job_stats([result.job_id]))[result.job_id].state == "COMPLETED"
-        output = backend._directory(result.job_id) / "outputs"
+        output = tmp_path / "controller/vast-jobs/unit-test" / item.job_id / "outputs"
         assert (output / "copied.txt").read_text() == "staged input\n"
         assert (output / "declared-0" / "result.txt").read_text() == "staged input\n"
-        log, error = await backend.fetch_log(result.job_id, "")
+        log, error = await runtime.run_manager.fetch_log_file(run_id, "task")
         assert error is None and "staged input" in log
