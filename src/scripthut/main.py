@@ -29,6 +29,7 @@ allocation_reader = AllocationReader()
 
 from scripthut import __version__
 from scripthut.backends.base import JobStats
+from scripthut.backends.slurm import SlurmBackend
 from scripthut.browser_login import LoginManager, make_login_router
 from scripthut.config import find_config_file, load_config, load_yaml_config, set_config
 from scripthut.config_schema import (
@@ -96,6 +97,7 @@ class AppState:
     startup_phase: str | None = None
     _startup_task: asyncio.Task[None] | None = None
     _polling_task: asyncio.Task[None] | None = None
+    _capacity_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     # SSE: global poll event for dashboard/runs pages
     _poll_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -165,11 +167,18 @@ def _job_filter() -> JobFilter:
 
 async def poll_backend(backend_state: BackendState, filter_user: str | None = None) -> None:
     """Poll jobs for a single backend."""
-    backend_state.poll_fresh = False
     if not backend_state.enabled:
         return
     if backend_state.backend is None:
         return
+
+    config = state.config.get_backend(backend_state.name) if state.config else None
+    if getattr(config, "scheduler_min_interval", 0):
+        now = time.monotonic()
+        if now < backend_state.next_job_poll:
+            return
+        backend_state.next_job_poll = now + state.config.settings.poll_interval
+    backend_state.poll_fresh = False
 
     if backend_state.socket_connection is not None:
         if not await check_backend_connection(backend_state):
@@ -212,8 +221,13 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
     plan = None
     try:
         jobs = await backend_state.backend.get_jobs(user=filter_user)
-        cluster_info = await backend_state.backend.get_cluster_info(user=backend_state.current_user)
+        separate_capacity = bool(getattr(config, "partition_capacity_interval", 0))
+        cluster_info = None
+        if not separate_capacity:
+            cluster_info = await backend_state.backend.get_cluster_info(user=backend_state.current_user)
         disk_info = await backend_state.backend.get_disk_info(backend_state.clone_dir)
+        if isinstance(backend_state.backend, SlurmBackend):
+            observed_at = backend_state.backend.queue_observed_at or observed_at
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         backend_state.jobs = jobs
 
@@ -224,10 +238,10 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
         backend_state.status = ConnectionStatus(
             connected=True,
             host=backend_state.status.host,
-            last_poll=datetime.now(UTC),
+            last_poll=observed_at,
             last_poll_duration_ms=duration_ms,
             job_count=len(jobs),
-            cluster_info=cluster_info,
+            cluster_info=backend_state.status.cluster_info if separate_capacity else cluster_info,
             disk_clone_dir=backend_state.clone_dir,
             disk_total_bytes=disk_info.total_bytes if disk_info else None,
             disk_avail_bytes=disk_info.avail_bytes if disk_info else None,
@@ -327,6 +341,27 @@ async def poll_backend(backend_state: BackendState, filter_user: str | None = No
             await state.run_manager.apply_backend_observations([
                 BackendObservation(plan, AccountingOutcome.FAILED),
             ])
+
+
+async def poll_partition_capacity(names: list[str], interval: int) -> None:
+    """One partition query per login identity, independent of job accounting."""
+    while not state._shutdown_event.is_set():
+        try:
+            aliases = [state.backends[name] for name in names]
+            reader = next((alias.backend for alias in aliases
+                           if alias.enabled and alias.status.connected and isinstance(alias.backend, SlurmBackend)), None)
+            if reader is not None:
+                partitions = await reader.fetch_partitions()
+                if partitions is not None:
+                    observed = datetime.now(UTC)
+                    for alias in aliases:
+                        if isinstance(alias.backend, SlurmBackend):
+                            snapshot = alias.backend.partition_snapshot(partitions, observed)
+                            alias.status = replace(alias.status, cluster_info=snapshot)
+                    state.notify_poll()
+        except Exception:
+            logger.exception("Partition capacity refresh failed for %s", names)
+        await asyncio.sleep(interval)
 
 
 async def poll_jobs() -> None:
@@ -466,6 +501,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except asyncio.CancelledError:
             pass
 
+    for task in state._capacity_tasks:
+        task.cancel()
+    await asyncio.gather(*state._capacity_tasks, return_exceptions=True)
+    state._capacity_tasks.clear()
+
     # Persist any unsaved runs and disconnect SSH-based backends
     if state.run_manager and state.run_storage:
         await shutdown_runtime(
@@ -531,6 +571,16 @@ async def _finish_startup(config: ScriptHutConfig) -> None:
 
         # Start background polling
         state._polling_task = asyncio.create_task(poll_jobs())
+        groups = {}
+        for backend in config.slurm_backends:
+            if backend.partition_capacity_interval:
+                key = (backend.ssh.host.lower(), backend.ssh.port, backend.ssh.user)
+                groups.setdefault(key, []).append(backend)
+        for aliases in groups.values():
+            interval = max(alias.partition_capacity_interval for alias in aliases)
+            state._capacity_tasks.append(asyncio.create_task(
+                poll_partition_capacity([alias.name for alias in aliases], interval)
+            ))
         logger.info("Startup complete — server ready")
     except asyncio.CancelledError:
         raise
@@ -2509,6 +2559,9 @@ async def cancel_run(run_id: str) -> Any:
         return {"error": "Run manager not initialized"}
 
     try:
+        run = state.run_manager.get_run(run_id)
+        if run and run.backend_name in state.run_manager.queued_backends:
+            return {"status": state.run_manager.request_cancellation(run), "run_id": run_id}
         success = await state.run_manager.cancel_run(run_id)
     except (ValueError, RuntimeError) as exc:
         return JSONResponse(status_code=409, content={"error": str(exc)})

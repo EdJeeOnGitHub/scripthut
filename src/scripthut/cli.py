@@ -309,7 +309,7 @@ class LocalClient:
         config = load_config(self._config_path)
         # Don't restore by default — the CLI is short-lived and restoring
         # would re-trigger process_run on every active run.
-        self._runtime = await init_runtime(config, restore_runs=self._restore_runs)
+        self._runtime = await init_runtime(config, restore_runs=self._restore_runs, controller=False)
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -733,7 +733,7 @@ class RemoteClient:
         ))
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
-        return await self._post(f"/runs/{run_id}/cancel")
+        return await self._post(f"/runs/{run_id}/cancel", accept_queued="true")
 
     async def rerun(self, run_id: str) -> dict[str, Any]:
         return await self._post(f"/runs/{run_id}/rerun")
@@ -3902,7 +3902,12 @@ async def _cmd_run_resolve(args: argparse.Namespace) -> int:
 
 async def _cmd_run_cancel(args: argparse.Namespace) -> int:
     async with _make_client(args) as client:
-        await client.cancel_run(args.id)
+        receipt = await client.cancel_run(args.id)
+    if isinstance(receipt, dict) and receipt.get("cancellation_state"):
+        if args.json:
+            return _emit_json(receipt)
+        print(f"Run {args.id}: cancellation {receipt['cancellation_state']}")
+        return 0
     if args.json:
         return _emit_json({"id": args.id, "cancelled": True})
     print(f"Cancelled run {args.id}")

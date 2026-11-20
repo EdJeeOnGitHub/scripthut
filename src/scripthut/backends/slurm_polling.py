@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 from scripthut.ssh.transport import ExecutionClient
 
@@ -21,8 +22,13 @@ class SlurmCommandGate:
         self.min_interval = min_interval
         self.query_cache_seconds = query_cache_seconds
         self._lock = asyncio.Lock()
+        self._mutations_waiting = 0
         self._last_start: float | None = None
-        self._cache: dict[str, tuple[float, tuple[str, str, int]]] = {}
+        self._cache: dict[str, tuple[float, tuple[str, str, int], datetime]] = {}
+
+    def observed_at(self, command: str) -> datetime | None:
+        entry = self._cache.get(command)
+        return entry[2] if entry else None
 
     async def run(
         self, client: ExecutionClient, command: str, timeout: int = 30,
@@ -34,26 +40,39 @@ class SlurmCommandGate:
             if input is None:
                 return await client.run_command(command, timeout=timeout)
             return await client.run_command(command, timeout=timeout, input=input)
-        async with self._lock:
-            now = time.monotonic()
-            self._cache = {
-                key: value for key, value in self._cache.items()
-                if now - value[0] < self.query_cache_seconds
-            }
-            if cache_queue and command in self._cache:
-                return self._cache[command][1]
-            if self._last_start is not None:
-                delay = self.min_interval - (now - self._last_start)
-                if delay > 0:
-                    await asyncio.sleep(delay)
+        if mutation:
+            self._mutations_waiting += 1
+        try:
+            while True:
+                # asyncio.Lock is FIFO. A read which yields its slot rejoins
+                # behind mutations already waiting, preserving mutation order.
+                async with self._lock:
+                    now = time.monotonic()
+                    self._cache = {
+                        key: value for key, value in self._cache.items()
+                        if now - value[0] < self.query_cache_seconds
+                    }
+                    if cache_queue and command in self._cache:
+                        return self._cache[command][1]
+                    if not mutation and self._mutations_waiting:
+                        continue
+                    if self._last_start is not None:
+                        delay = self.min_interval - (now - self._last_start)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                            if not mutation and self._mutations_waiting:
+                                continue
+                    if mutation:
+                        self._cache.clear()
+                    self._last_start = time.monotonic()
+                    observed = datetime.now(UTC)
+                    if input is None:
+                        result = await client.run_command(command, timeout=timeout)
+                    else:
+                        result = await client.run_command(command, timeout=timeout, input=input)
+                    if cache_queue and result[2] == 0 and self.query_cache_seconds:
+                        self._cache[command] = (self._last_start, result, observed)
+                    return result
+        finally:
             if mutation:
-                self._cache.clear()
-            # Reserve even on failure: errors must not trigger rapid retries.
-            self._last_start = time.monotonic()
-            if input is None:
-                result = await client.run_command(command, timeout=timeout)
-            else:
-                result = await client.run_command(command, timeout=timeout, input=input)
-            if cache_queue and result[2] == 0 and self.query_cache_seconds:
-                self._cache[command] = (self._last_start, result)
-            return result
+                self._mutations_waiting -= 1

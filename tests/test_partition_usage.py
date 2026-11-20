@@ -95,7 +95,7 @@ async def test_hardware_groups_sum_counts_within_partition_only():
         "pool*|up|8/2/0/10|1|8192|4:00:00|old\n"
         "pool|up|9/81/10/100|2|16384|4:00:00|new\n"
         "other|up|8/2/0/10|1|8192|4:00:00|old\n", '', 0)
-    rows = await SlurmBackend(ssh)._fetch_partitions()
+    rows = await SlurmBackend(ssh).fetch_partitions()
     assert [row.name for row in rows] == ['pool', 'other']
     pool = rows[0]
     assert (pool.cpus_allocated, pool.cpus_idle, pool.cpus_other, pool.cpus_total) == (17, 83, 10, 110)
@@ -105,3 +105,45 @@ async def test_hardware_groups_sum_counts_within_partition_only():
     assert rows[1].cpus_total == 10
     html = render(ClusterInfo(rows, {}))
     assert '15% allocated' in html  # Weighted by CPUs, not mean of 80% and 9%.
+
+
+@pytest.mark.asyncio
+async def test_independent_capacity_refresh_keeps_shared_snapshot_on_failure(monkeypatch):
+    import asyncio
+    from starlette.requests import Request
+
+    aliases = {}
+    ssh = AsyncMock()
+    rows = 'one|up|1/1/0/2|1|4096|1:00:00|cpu\ntwo|up|0/0/0/0|0|0|1:00:00|cpu\n'
+    ssh.run_command.side_effect = [(rows, '', 0), ('', 'unavailable', 1)]
+    for name in ('one', 'two'):
+        aliases[name] = BackendState(name=name, backend_type='slurm', backend=SlurmBackend(ssh, default_partition=name),
+                                     status=ConnectionStatus(connected=True, host='login'))
+    monkeypatch.setattr(main.state, 'backends', aliases)
+    monkeypatch.setattr(main.state, '_shutdown_event', asyncio.Event())
+    calls = []
+
+    async def sleep(seconds):
+        calls.append(seconds)
+        if len(calls) == 2:
+            main.state._shutdown_event.set()
+
+    monkeypatch.setattr(main.asyncio, 'sleep', sleep)
+    await main.poll_partition_capacity(list(aliases), 900)
+    assert calls == [900, 900]
+    for name, alias in aliases.items():
+        info = alias.status.cluster_info
+        assert info.observed_at
+        assert [p.name for p in info.overview_partitions] == [name]
+        for _ in range(3):
+            assert 'Observed' in render(info)
+    assert aliases['one'].status.cluster_info.observed_at == aliases['two'].status.cluster_info.observed_at
+    assert ssh.run_command.await_count == 2
+
+    template = main.templates.get_template('nav.html')
+    for path in ('/artifacts', '/efficiency'):
+        request = Request({'type': 'http', 'path': path, 'headers': [], 'scheme': 'http',
+                           'query_string': b'', 'server': ('test', 80)})
+        html = template.render(request=request)
+        assert html.count('aria-hidden="true" class="w-4 h-4 inline-block') >= 4
+        assert f'href="{path}"' in html

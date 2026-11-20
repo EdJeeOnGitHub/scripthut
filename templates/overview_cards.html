@@ -335,6 +335,7 @@
                 {% if ci %}
                 <div class="text-xs text-gray-500" title="Partitions may share nodes. Counts are shown separately, never added together. These are scheduler allocations, not measured CPU activity or account quotas.">
                     Cluster capacity
+ {% if ci.observed_at %}<span class="text-xs text-gray-500">Observed {{ ci.observed_at.strftime("%H:%M UTC · %Y-%m-%d") }}</span>{% endif %}
                 </div>
                 {% set overview_partitions = ci.overview_partitions %}
                 {% for p in overview_partitions[:3] %}
@@ -356,7 +357,7 @@
                     </div>
                 </div>
                 {% else %}
-                <div class="flex justify-between text-xs text-gray-500"><span>{{ p.name }}</span><span>Capacity unavailable</span></div>
+                <div class="flex justify-between text-xs text-gray-500"><span>{{ p.name }}</span><span>{% if ci.partition_summary_only %}0 CPUs reported{% else %}Capacity unavailable{% endif %}</span></div>
                 {% endif %}
                 {% else %}
                 <div class="text-xs text-gray-500">Partition availability not reported.</div>

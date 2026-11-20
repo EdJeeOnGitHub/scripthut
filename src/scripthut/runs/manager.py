@@ -146,6 +146,8 @@ class RunManager:
         backend_users: dict[str, str | None] | None = None,
     ) -> None:
         """Initialize with config, SSH backends, and optional persistent storage."""
+        self.queued_backends: set[str] = set()
+        self._action_workers: dict[tuple[str, str], asyncio.Task] = {}
         self.submissions = SubmissionManager(self)
         self.available: Callable[[str], bool] = lambda name: (
             name not in self.backends or self.backends[name].is_connected
@@ -868,7 +870,7 @@ class RunManager:
         self._persist_run(run)
 
         # Start submitting tasks
-        await self.process_run(run)
+        await self.start_submission(run)
 
         return run
 
@@ -1700,6 +1702,8 @@ class RunManager:
                 'retry output collection separately'
             )
 
+        if run.cancellation_state in {"requested", "sent"}:
+            raise SubmissionConflict("Wait for scheduler cancellation before rerunning")
         if run.submission_unresolved:
             raise SubmissionConflict("Resolve unknown submissions before rerunning")
         if run.status in (RunStatus.RUNNING, RunStatus.PENDING):
@@ -1708,6 +1712,7 @@ class RunManager:
         if self.storage:
             self.storage.efficiency_store.safe_record([run])
         self._invalidate_observations(run)
+        run.cancellation_state = None
         # Reset all items to pending
         for item in run.items:
             item.status = RunItemStatus.PENDING
@@ -1728,7 +1733,7 @@ class RunManager:
         self.notify_run(run_id)
 
         # Start submitting tasks
-        await self.process_run(run)
+        await self.start_submission(run)
 
         return run
 
@@ -2034,7 +2039,7 @@ class RunManager:
     async def submit_task(self, run: Run, item: RunItem) -> bool | None:
         async with self.submissions.backend_lock(run), self.submissions.lock(run):
             if (
-                item.status != RunItemStatus.PENDING or run.submission_unresolved
+                item.status != RunItemStatus.PENDING or run.cancellation_state or run.submission_unresolved
                 or not self.available(run.backend_name)
             ):
                 return None
@@ -2171,7 +2176,7 @@ class RunManager:
         a large run can't monopolise the backend. Pass ``fair_share=False`` for
         a greedy mop-up pass that fills slots the fair pass left idle.
         """
-        if run.submission_unresolved or not self.available(run.backend_name):
+        if run.cancellation_state or run.submission_unresolved or not self.available(run.backend_name):
             return
         # Cascade failures
         changed = True
@@ -2414,6 +2419,11 @@ class RunManager:
                         continue
                     await self.submissions.reconcile(run)
                     await self._apply_queue(run, plan)
+                for run in list(self.runs.values()):
+                    if run.backend_name == backend_name:
+                        if run.cancellation_state == "requested":
+                            self.schedule_action(run, "cancel")
+                        self.update_cancellation(run)
                 # Preserve the fair first pass and greedy mop-up. Re-drive runs
                 # even when another run, rather than this one, freed a slot.
                 for run in self._contending_runs(backend_name):
@@ -2681,10 +2691,70 @@ class RunManager:
 
     def _has_submittable_items(self, run: Run) -> bool:
         """True if the run has PENDING items whose dependencies are satisfied."""
-        return not run.submission_unresolved and any(
+        return not run.cancellation_state and not run.submission_unresolved and any(
             item.status == RunItemStatus.PENDING and run.are_deps_satisfied(item)
             for item in run.items
         )
+
+    async def start_submission(self, run: Run) -> None:
+        if run.backend_name in self.queued_backends:
+            if run.request_key is None:
+                self.submissions.save(run)
+            self.schedule_action(run, "submit")
+        else:
+            await self.process_run(run)
+
+    def schedule_action(self, run: Run, action: str) -> None:
+        key = (run.id, action)
+        if key in self._action_workers:
+            return
+
+        async def drive():
+            try:
+                if action == "cancel":
+                    await self.cancel_run(run.id)
+                else:
+                    await self.process_run(run)
+            except Exception:
+                logger.exception("Deferred %s for run %s", action, run.id)
+            finally:
+                self._action_workers.pop(key, None)
+
+        self._action_workers[key] = asyncio.create_task(drive())
+
+    async def stop_action_workers(self) -> None:
+        workers = list(self._action_workers.values())
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    def request_cancellation(self, run: Run) -> str:
+        if not run.cancellation_state:
+            if run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
+                return "already_finished"
+            if run.submission_unresolved and not any(key[0] == run.id for key in self._action_workers):
+                raise SubmissionConflict("Resolve unknown submissions before cancelling this run")
+            run.cancellation_state = "requested"
+            try:
+                self.submissions.save(run)
+            except Exception:
+                run.cancellation_state = None
+                raise
+        if run.cancellation_state == "requested":
+            self.schedule_action(run, "cancel")
+        return run.cancellation_state
+
+    def update_cancellation(self, run: Run) -> None:
+        if run.cancellation_state != "sent":
+            return
+        jobs = [item for item in run.items if item.job_id]
+        backend = self.get_job_backend(run.backend_name)
+        if backend and all(item.scheduler_state in backend.terminal_states for item in jobs):
+            run.cancellation_state = (
+                "confirmed" if not jobs or any(item.scheduler_state == "CANCELLED" for item in jobs)
+                else "already_finished"
+            )
+            self.submissions.save(run)
 
     async def cancel_run(self, run_id: str, failure: dict[str, Any] | None = None) -> bool:
         run = self.runs.get(run_id)
@@ -2701,6 +2771,10 @@ class RunManager:
                     raise SubmissionConflict("Could not persist deployment cancellation intent")
             self._invalidate_observations(run)
             cancelled = await self._cancel_run(run_id)
+            if run.cancellation_state == "requested":
+                run.cancellation_state = "sent"
+                self.submissions.save(run)
+                self.update_cancellation(run)
             if failure is not None:
                 backend = self.get_job_backend(run.backend_name)
                 ids = [item.job_id for item in run.items if item.job_id]
@@ -2842,10 +2916,13 @@ class RunManager:
             if self.available(run.backend_name):
                 await self.submissions.reconcile(run)
         for run in list(self.runs.values()):
+            if run.cancellation_state == "requested":
+                self.schedule_action(run, "cancel")
+                continue
             if run.status not in (RunStatus.PENDING, RunStatus.RUNNING):
                 continue
             try:
-                await self.process_run(run)
+                await self.start_submission(run)
             except Exception as exc:
                 logger.error(f"Failed to process run '{run.id}' during restore: {exc}")
 

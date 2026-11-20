@@ -334,6 +334,7 @@ class SlurmBackend(JobBackend):
         """
         self._ssh = ssh_client
         self._command_gate = command_gate or SlurmCommandGate()
+        self.queue_observed_at: datetime | None = None
         self._poll_cluster_info = poll_cluster_info
         self._account = account
         self._qos = qos
@@ -378,7 +379,9 @@ class SlurmBackend(JobBackend):
         if user:
             cmd += f" --user={user}"
 
+        observed = datetime.now(UTC)
         stdout, stderr, exit_code = await self._run_scheduler_command(cmd, cache_queue=True)
+        self.queue_observed_at = self._command_gate.observed_at(cmd) or observed
 
         if exit_code != 0:
             logger.error(f"squeue failed (exit {exit_code}): {stderr}")
@@ -448,7 +451,9 @@ class SlurmBackend(JobBackend):
         # pass invalid/expired IDs to the main query (which would make it
         # fail entirely).
         stats: dict[str, JobStats] = {}
-        known_ids = await self._get_known_sacct_ids(user=user)
+        # Budgeted headnodes receive only the IDs selected by reconciliation.
+        # A separate sixty-day accounting inventory is much more expensive.
+        known_ids = None if self._command_gate.min_interval else await self._get_known_sacct_ids(user=user)
         if known_ids is not None:
             valid_ids = [jid for jid in job_ids if jid in known_ids]
             stale_ids = [jid for jid in job_ids if jid not in known_ids]
@@ -625,6 +630,24 @@ class SlurmBackend(JobBackend):
         logger.debug(f"Fetched stats for {len(stats)}/{len(job_ids)} jobs via sacct")
         return stats
 
+    def partition_snapshot(self, partitions: list[PartitionInfo], observed_at: datetime) -> ClusterInfo:
+        return ClusterInfo(
+            partitions=partitions,
+            pending_reasons={},
+            overview_partition_names=self.overview_partition_names(),
+            observed_at=observed_at,
+            partition_summary_only=True,
+        )
+
+    def overview_partition_names(self) -> list[str] | None:
+        return sorted({
+            name.strip()
+            for value in [self._default_partition, *self._partition_map.values()]
+            if value
+            for name in value.split(",")
+            if name.strip()
+        }) or None
+
     async def get_cluster_info(self, user: str | None = None) -> ClusterInfo | None:
         """Fetch per-partition availability, pending reasons, and quota.
 
@@ -644,7 +667,7 @@ class SlurmBackend(JobBackend):
         """
         if not self._poll_cluster_info:
             return None
-        partitions = await self._fetch_partitions()
+        partitions = await self.fetch_partitions()
         if partitions is None:
             return None
         node_by_part = await self._fetch_node_info()
@@ -664,16 +687,10 @@ class SlurmBackend(JobBackend):
             partitions=partitions,
             pending_reasons=pending_reasons,
             user_quota=user_quota,
-            overview_partition_names=sorted({
-                name.strip()
-                for value in [self._default_partition, *self._partition_map.values()]
-                if value
-                for name in value.split(",")
-                if name.strip()
-            }) or None,
+            overview_partition_names=self.overview_partition_names(),
         )
 
-    async def _fetch_partitions(self) -> list[PartitionInfo] | None:
+    async def fetch_partitions(self) -> list[PartitionInfo] | None:
         # A custom format overrides --summarize; hardware features can split
         # a partition across disjoint node groups. Merge those counts below.
         # Fields: PartitionName | Avail | A/I/O/T cpus | total nodes | mem/node | timelimit | features
@@ -751,6 +768,8 @@ class SlurmBackend(JobBackend):
                     setattr(target, key, None)
             if target.state != row.state:
                 target.state = 'mixed'
+        if stdout.strip() and not grouped:
+            return None
         return list(grouped.values())
 
     async def _fetch_node_info(self) -> dict[str, _PartitionNodeStats]:

@@ -204,6 +204,10 @@ class SlurmBackendConfig(BaseModel):
         default=0, ge=0,
         description="Reuse identical job-list queries across aliases for this many seconds",
     )
+    partition_capacity_interval: int = Field(
+        default=0, ge=0,
+        description="Seconds between shared partition-only capacity snapshots; zero disables the separate poll",
+    )
     poll_cluster_info: bool = Field(
         default=True,
         description="Poll capacity and quota automatically; disable to conserve scheduler RPCs",
