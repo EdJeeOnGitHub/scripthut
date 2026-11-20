@@ -38,5 +38,10 @@ async def test_unix_proxy_preserves_acceptance_and_conflicts(tmp_path, monkeypat
         assert (await client.post('/api/v1/research-runs', json={'commit': 'a'*40})).status_code == 202
         assert (await client.post('/api/v1/research-runs', json={})).status_code == 409
         assert (await client.post('/api/v1/research-runs', content=b'x'*16385)).status_code == 413
+        source = '/api/v1/research-runs/' + 'a'*32 + '/source'
+        assert (await client.post(source, content=b'B'*65536)).status_code == 409
+        assert seen[-1][1] == b'B'*65536
+        assert b'application/octet-stream' in seen[-1][0]
+        assert (await client.post(source, headers={'Content-Length': str(1024**3+1)})).status_code == 413
     assert b'POST /research-runs HTTP/1.1' in seen[0][0]
     assert b'commit' in seen[0][1]
