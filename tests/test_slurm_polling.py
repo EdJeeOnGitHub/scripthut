@@ -158,3 +158,36 @@ async def test_budgeted_accounting_only_requests_selected_ids():
     assert client.run_command.await_count == 1
     command = client.run_command.await_args.args[0]
     assert "41,42" in command and "60days" not in command
+
+
+async def test_cancelling_priority_waiter_releases_background_read():
+    gate = SlurmCommandGate(60)
+    client = AsyncMock()
+    client.run_command.return_value = ("", "", 0)
+    await gate.run(client, "squeue")
+    waiting, release = asyncio.Event(), asyncio.Event()
+
+    async def sleep(delay):
+        waiting.set()
+        await release.wait()
+
+    class BoundedLock(asyncio.Lock):
+        entries = 0
+
+        async def __aenter__(self):
+            self.entries += 1
+            assert self.entries < 20, "read spun while cancelled mutation was unwinding"
+            return await super().__aenter__()
+
+    gate._lock = BoundedLock()
+    with patch("scripthut.backends.slurm_polling.asyncio.sleep", side_effect=sleep):
+        read = asyncio.create_task(gate.run(client, "sacct"))
+        await waiting.wait()
+        mutation = asyncio.create_task(gate.run(client, "scancel", mutation=True))
+        loop = asyncio.get_running_loop()
+        loop.call_soon(release.set)
+        loop.call_soon(mutation.cancel)
+        await read
+        with pytest.raises(asyncio.CancelledError):
+            await mutation
+    assert [call.args[0] for call in client.run_command.await_args_list] == ["squeue", "sacct"]

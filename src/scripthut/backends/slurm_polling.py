@@ -23,6 +23,8 @@ class SlurmCommandGate:
         self.query_cache_seconds = query_cache_seconds
         self._lock = asyncio.Lock()
         self._mutations_waiting = 0
+        self._mutations_idle = asyncio.Event()
+        self._mutations_idle.set()
         self._last_start: float | None = None
         self._cache: dict[str, tuple[float, tuple[str, str, int], datetime]] = {}
 
@@ -42,8 +44,13 @@ class SlurmCommandGate:
             return await client.run_command(command, timeout=timeout, input=input)
         if mutation:
             self._mutations_waiting += 1
+            self._mutations_idle.clear()
         try:
             while True:
+                if not mutation:
+                    # A cancelled waiter can disappear from the lock queue before
+                    # its coroutine runs its finally block. Yield until it does.
+                    await self._mutations_idle.wait()
                 # asyncio.Lock is FIFO. A read which yields its slot rejoins
                 # behind mutations already waiting, preserving mutation order.
                 async with self._lock:
@@ -76,3 +83,5 @@ class SlurmCommandGate:
         finally:
             if mutation:
                 self._mutations_waiting -= 1
+                if not self._mutations_waiting:
+                    self._mutations_idle.set()
