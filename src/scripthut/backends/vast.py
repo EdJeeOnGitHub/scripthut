@@ -36,12 +36,45 @@ FAILURES = {
 }
 
 
+LAUNCH_RETRY_SECONDS = 10
+
+
 class VastBackend(JobBackend):
     def __init__(self, config: VastBackendConfig, state_root: Path) -> None:
         self.config = config
         self.root = state_root / config.rental_namespace
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock = asyncio.Lock()
+        self._launch_wakeup = asyncio.Event()
+        self._launch_worker: asyncio.Task | None = None
+
+    def start_launch_worker(self) -> None:
+        if self._launch_worker is None:
+            self._launch_wakeup.set()
+            self._launch_worker = asyncio.create_task(self._launch_loop())
+
+    async def stop_launch_worker(self) -> None:
+        if self._launch_worker is not None:
+            self._launch_worker.cancel()
+            try:
+                await self._launch_worker
+            except asyncio.CancelledError:
+                pass
+            self._launch_worker = None
+
+    async def _launch_loop(self) -> None:
+        while True:
+            await self._launch_wakeup.wait()
+            self._launch_wakeup.clear()
+            try:
+                if not await self._poll_jobs(pending_only=True):
+                    continue
+            except Exception:
+                logger.exception("Could not check pending Vast rentals")
+            try:
+                await asyncio.wait_for(self._launch_wakeup.wait(), timeout=LAUNCH_RETRY_SECONDS)
+            except TimeoutError:
+                self._launch_wakeup.set()
 
     @property
     def name(self) -> str:
@@ -176,8 +209,10 @@ class VastBackend(JobBackend):
                     except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
                         break
                     self._save(job_id, record)
+                    self._launch_wakeup.set()
                     return SubmitResult(job_id, f"Vast instance {record['instance']}")
                 if (directory / "state.json").exists():
+                    self._launch_wakeup.set()
                     return SubmitResult(job_id, "Awaiting Vast rental confirmation")
             raise OSError("No Vast offer satisfies the task requirements")
 
@@ -308,6 +343,7 @@ class VastBackend(JobBackend):
                     await conn.run(f"chmod 700 {REMOTE}/task.sh; "
                                    f"nohup bash -c {shlex.quote(wrapper)} "
                                    "</dev/null >/dev/null 2>&1 &", check=True, timeout=15)
+                record["launch_status"] = "started"
                 record["started"] = time.time()
                 self._save(job_id, record)
             if not await sftp.exists(f"{REMOTE}/code"):
@@ -394,12 +430,21 @@ class VastBackend(JobBackend):
         return True
 
     async def get_jobs(self, user: str | None = None) -> list[HPCJob]:
+        return await self._poll_jobs(pending_only=False)
+
+    async def _poll_jobs(self, *, pending_only: bool) -> list[HPCJob]:
         async with self.lock:
+            records = self._records()
+            if pending_only:
+                records = {job_id: r for job_id, r in records.items()
+                           if not (r.get("started") or r.get("state") or r.get("finishing"))}
+                if not records:
+                    return []
             instances = await self.api.list_instances()
             by_label = {instance.get("label"): instance for instance in instances}
             by_id = {str(instance["id"]): instance for instance in instances}
             active = []
-            for job_id, record in self._records().items():
+            for job_id, record in records.items():
                 if record.get("state"):
                     # A lost create response may surface after the local deadline.
                     if not record.get("instance") and (late := by_label.get(record["label"])):
@@ -423,6 +468,12 @@ class VastBackend(JobBackend):
                                 record.update(finishing="TIMEOUT", code=124)
                         elif now - record["submitted"] > self.config.startup_timeout_seconds:
                             record.update(finishing="TIMEOUT", code=124)
+                        if not record.get("started") and not record.get("finishing"):
+                            record["last_launch_check"] = now
+                            record["launch_status"] = (
+                                instance.get("actual_status") if instance else "awaiting rental"
+                            )
+                            self._save(job_id, record)
                         running = instance and instance.get("actual_status") == "running"
                         if not record.get("finishing") and running:
                             deadline = (
@@ -437,6 +488,9 @@ class VastBackend(JobBackend):
                             continue
                 except (OSError, asyncssh.Error, RuntimeError, httpx.HTTPError,
                         ValueError, KeyError, TypeError) as exc:
+                    if not record.get("started") and not record.get("finishing"):
+                        record["launch_status"] = type(exc).__name__
+                        self._save(job_id, record)
                     logger.warning("Vast job %s will retry after %s", job_id, type(exc).__name__)
                 active.append(HPCJob(
                     job_id=job_id, name=record["task"], user="vast",
