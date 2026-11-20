@@ -769,3 +769,41 @@ async def test_deployment_cancellation_persists_reason_and_verifies_scheduler(se
     assert stored.failure == failure
     assert stored.items[0].error == failure["message"]
     assert stored.items[1].status == Status.FAILED
+
+
+@pytest.mark.asyncio
+async def test_controller_accepts_before_scheduler_and_recovers_pending_cancellation(setup):
+    manager, run, ssh, backend = setup
+    manager.queued_backends.add("b")
+    await manager.start_submission(run)
+    assert disk_item(manager).status == Status.PENDING
+    assert ssh.run_command.await_count == 0
+    # Simulate stopping after intent persisted and before workers ran.
+    assert manager.request_cancellation(run) == "requested"
+    assert manager.storage.load_all_runs()[run.id].cancellation_state == "requested"
+    await manager.stop_action_workers()
+
+    restored = RunManager(manager.config, manager.backends, manager.storage, {"b": backend})
+    restored.queued_backends.add("b")
+    await restored.restore_from_storage()
+    await asyncio.gather(*restored._action_workers.values())
+    assert restored.runs[run.id].cancellation_state == "confirmed"
+    assert disk_item(restored).status == Status.FAILED
+    assert ssh.run_command.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancellation_receipt_distinguishes_scheduler_confirmation(setup):
+    manager, run, ssh, backend = setup
+    item = run.items[0]
+    item.status, item.job_id = Status.RUNNING, "42"
+    ssh.run_command.return_value = ("", "", 0)
+    assert manager.request_cancellation(run) == "requested"
+    assert ssh.run_command.await_count == 0
+    await asyncio.gather(*manager._action_workers.values())
+    assert run.cancellation_state == "sent"
+    assert manager.request_cancellation(run) == "sent"
+    assert ssh.run_command.await_count == 1
+    item.scheduler_state = "CANCELLED"
+    manager.update_cancellation(run)
+    assert manager.storage.load_all_runs()[run.id].cancellation_state == "confirmed"

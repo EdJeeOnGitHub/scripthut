@@ -65,6 +65,13 @@ def make_research_router() -> APIRouter:
     async def submit(request: Request) -> Response:
         return await proxy(request)
 
+    @router.get('/source-cache/{project}/{commit}')
+    async def source_cache(project: str, commit: str, request: Request) -> Response:
+        import re
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}', project) or not re.fullmatch('[a-f0-9]{40}', commit):
+            raise HTTPException(400, 'Expected project identifier and full Git SHA')
+        return await proxy(request, '/source-cache/' + project + '/' + commit)
+
     @router.get('/{request_id}')
     async def status(request_id: str, request: Request) -> Response:
         return await operation(request_id, 'status', request)

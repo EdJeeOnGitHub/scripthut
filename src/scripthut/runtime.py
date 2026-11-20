@@ -71,6 +71,7 @@ class BackendState:
         default_factory=lambda: ConnectionStatus(connected=False, host="")
     )
     poll_fresh: bool = False
+    next_job_poll: float = 0.0
     enabled: bool = True
     browser_login: bool = False
     command_log: CommandLog = field(default_factory=CommandLog)
@@ -312,7 +313,7 @@ async def init_backend(
 
 
 async def init_runtime(
-    config: ScriptHutConfig, *, restore_runs: bool = True,
+    config: ScriptHutConfig, *, restore_runs: bool = True, controller: bool = True,
     on_phase: Callable[[str], None] | None = None,
 ) -> Runtime:
     """Initialize backends, storage, and run manager from a loaded config.
@@ -368,6 +369,8 @@ async def init_runtime(
         key = (c.ssh.host.lower(), c.ssh.port, c.ssh.user)
         gate = gates.setdefault(key, SlurmCommandGate())
         # Aliases cannot weaken an endpoint's configured budget.
+        if not controller:
+            continue
         gate.min_interval = max(gate.min_interval, c.scheduler_min_interval)
         gate.query_cache_seconds = max(
             gate.query_cache_seconds, c.scheduler_query_cache_seconds,
@@ -416,6 +419,11 @@ async def init_runtime(
         return bool(bs and bs.enabled and bs.status.connected
                     and (bs.ssh_client is None or bs.ssh_client.is_connected))
 
+    if controller:
+        run_manager.queued_backends = {
+            c.name for c in config.slurm_backends
+            if gates[(c.ssh.host.lower(), c.ssh.port, c.ssh.user)].min_interval
+        }
     run_manager.available = available
     logger.info(
         f"Initialized run manager with {len(config.sources)} sources"
@@ -439,6 +447,7 @@ async def init_runtime(
 
 async def shutdown_runtime(runtime: Runtime) -> None:
     """Persist any dirty runs and disconnect all SSH-based backends."""
+    await runtime.run_manager.stop_action_workers()
     runtime.run_manager.save_dirty()
     for backend_state in runtime.backends.values():
         if isinstance(backend_state.backend, VastBackend):

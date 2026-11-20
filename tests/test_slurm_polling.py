@@ -118,3 +118,43 @@ async def test_defaults_keep_budget_disabled():
     client.run_command.return_value = ("", "", 0)
     await asyncio.gather(*(gate.run(client, "squeue", cache_queue=True) for _ in range(2)))
     assert client.run_command.await_count == 2
+
+
+async def test_mutations_take_next_slots_ahead_of_waiting_accounting():
+    gate = SlurmCommandGate(60)
+    now = [100.0]
+    waiting, release = asyncio.Event(), asyncio.Event()
+    starts = []
+    client = AsyncMock()
+
+    async def execute(command, **kwargs):
+        starts.append((now[0], command))
+        return "", "", 0
+
+    async def sleep(delay):
+        waiting.set()
+        await release.wait()
+        now[0] += delay
+
+    client.run_command.side_effect = execute
+    with patch("scripthut.backends.slurm_polling.time.monotonic", side_effect=lambda: now[0]), patch(
+        "scripthut.backends.slurm_polling.asyncio.sleep", side_effect=sleep
+    ):
+        await gate.run(client, "squeue")
+        accounting = asyncio.create_task(gate.run(client, "sacct"))
+        await waiting.wait()
+        cancel = asyncio.create_task(gate.run(client, "scancel", mutation=True))
+        submit = asyncio.create_task(gate.run(client, "sbatch", mutation=True))
+        release.set()
+        await asyncio.gather(cancel, submit, accounting)
+    assert starts == [(100, "squeue"), (160, "scancel"), (220, "sbatch"), (280, "sacct")]
+
+
+async def test_budgeted_accounting_only_requests_selected_ids():
+    client = AsyncMock()
+    client.run_command.return_value = ("", "", 0)
+    backend = SlurmBackend(client, command_gate=SlurmCommandGate(60))
+    await backend.get_job_stats(["41", "42"])
+    assert client.run_command.await_count == 1
+    command = client.run_command.await_args.args[0]
+    assert "41,42" in command and "60days" not in command

@@ -122,6 +122,9 @@ class ClusterInfo:
     # None means all visible partitions, not an assertion about account access.
     overview_partition_names: list[str] | None = None
 
+    observed_at: datetime | None = None
+    partition_summary_only: bool = False
+
     @property
     def overview_partitions(self) -> list[PartitionInfo]:
         if self.overview_partition_names is None:

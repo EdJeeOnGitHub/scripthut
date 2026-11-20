@@ -576,6 +576,7 @@ class Run:
     artifact_refs: dict[str, Any] | None = None
     request_key: str | None = None
     failure: dict[str, Any] | None = None
+    cancellation_state: str | None = None
 
     @property
     def submission_unresolved(self) -> bool:
@@ -618,6 +619,10 @@ class Run:
     @property
     def status(self) -> RunStatus:
         """Calculate overall run status."""
+        if self.cancellation_state in {"requested", "sent"}:
+            return RunStatus.RUNNING
+        if self.cancellation_state == "confirmed":
+            return RunStatus.CANCELLED
         if not self.items:
             return RunStatus.COMPLETED
 

@@ -75,6 +75,7 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "created_at": run.created_at.isoformat(),
         "status": run.status.value,
         "failure": run.failure,
+        "cancellation_state": run.cancellation_state,
         "task_count": total,
         "completed_count": completed,
         "submitted_count": submitted_count,
@@ -804,6 +805,9 @@ def make_api_router(state: AppState) -> APIRouter:
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         summary = _run_summary(run)
+        backend = state.backends.get(run.backend_name)
+        if backend and backend.status.last_poll:
+            summary["scheduler_observed_at"] = backend.status.last_poll.isoformat()
         items = []
         for item in run.items:
             d = item.to_dict()
@@ -889,7 +893,7 @@ def make_api_router(state: AppState) -> APIRouter:
         return result
 
     @router.post("/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def cancel_run(run_id: str, body: dict[str, Any] | None = None, accept_queued: bool = False) -> dict[str, Any]:
         rm = _require_manager()
         try:
             failure = None
@@ -898,6 +902,10 @@ def make_api_router(state: AppState) -> APIRouter:
                     raise HTTPException(400, "Expected a deployment_id")
                 from scripthut.maintenance import cancellation_failure
                 failure = cancellation_failure(body["deployment_id"])
+            run = rm.get_run(run_id)
+            if accept_queued and not failure and run and run.backend_name in rm.queued_backends:
+                phase = rm.request_cancellation(run)
+                return {"run_id": run_id, "cancellation_state": phase, "cancelled": phase == "confirmed"}
             cancelled = await rm.cancel_run(run_id, failure=failure)
         except SubmissionConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
