@@ -12,7 +12,7 @@ from scripthut.api import make_api_router
 from scripthut.backends.vast import VastBackend
 from scripthut.config_schema import ScriptHutConfig
 from scripthut.runs.models import RunItemStatus, TaskDefinition
-from scripthut.runtime import init_runtime
+from scripthut.runtime import init_runtime, shutdown_runtime
 
 
 class Marketplace:
@@ -226,7 +226,13 @@ async def test_submit_api_runs_vast_task_over_ssh(tmp_path, backend_factory, mon
             actual_status="running", public_ipaddr="127.0.0.1",
             ports={"22/tcp": [{"HostPort": str(port)}]},
         )
+        # Launch through the runtime worker before allowing a shared poll.
+        monkeypatch.setattr("scripthut.backends.vast.LAUNCH_RETRY_SECONDS", 0.01)
+        backend = runtime.backends["vast-gpu"].backend
+        backend._launch_wakeup.set()
         async with asyncio.timeout(5):
+            while not backend._records()[item.job_id].get("started"):
+                await asyncio.sleep(0.01)
             while item.status != RunItemStatus.COMPLETED:
                 await main.poll_backend(runtime.backends["vast-gpu"])
                 await asyncio.sleep(0.05)
@@ -236,3 +242,48 @@ async def test_submit_api_runs_vast_task_over_ssh(tmp_path, backend_factory, mon
         assert (output / "declared-0" / "result.txt").read_text() == "staged input\n"
         log, error = await runtime.run_manager.fetch_log_file(run_id, "task")
         assert error is None and "staged input" in log
+        await shutdown_runtime(runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [False, True], ids=["new-booking", "restart"])
+async def test_launch_while_shared_poll_is_stalled(backend_factory, monkeypatch, recover):
+    market, make_backend = backend_factory
+    backend = make_backend()
+    monkeypatch.setattr("scripthut.backends.vast.LAUNCH_RETRY_SECONDS", 0.01)
+    if not recover:
+        backend.start_launch_worker()
+        await asyncio.sleep(0)  # Let the worker go idle before submission.
+    stalled_poll = asyncio.create_task(asyncio.sleep(601))
+    try:
+        result = await backend.submit_task(
+            TaskDefinition(id="task", name="Task", command="true"), "true",
+            {"SCRIPTHUT_RUN_ID": "run"},
+        )
+        if recover:
+            backend = make_backend()
+            backend.start_launch_worker()
+        launched = asyncio.Event()
+        starts = []
+
+        async def observe(job_id, record, instance):
+            if not record.get("started"):
+                starts.append(job_id)
+                record["started"] = record["last_launch_check"]
+                backend._save(job_id, record)
+                launched.set()
+
+        backend._observe = observe
+        async with asyncio.timeout(2):
+            while not backend._records()[result.job_id].get("last_launch_check"):
+                await asyncio.sleep(0.005)
+            assert backend._records()[result.job_id]["launch_status"] == "loading"
+            market.instances[0]["actual_status"] = "running"
+            await launched.wait()
+        await backend.get_jobs()
+        assert starts == [result.job_id]
+        assert not stalled_poll.done()
+    finally:
+        stalled_poll.cancel()
+        await asyncio.gather(stalled_poll, return_exceptions=True)
+        await backend.stop_launch_worker()

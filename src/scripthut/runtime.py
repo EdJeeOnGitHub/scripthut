@@ -168,6 +168,7 @@ async def init_vast_backend(config: VastBackendConfig, state_root: Path) -> Back
         status = ConnectionStatus(connected=connected, host="vast.ai")
     except Exception as exc:
         status = ConnectionStatus(connected=False, host="vast.ai", error=str(exc))
+    backend.start_launch_worker()
     return BackendState(
         name=config.name, backend_type="vast", ssh_client=None, backend=backend,
         status=status, clone_dir="",
@@ -440,5 +441,7 @@ async def shutdown_runtime(runtime: Runtime) -> None:
     """Persist any dirty runs and disconnect all SSH-based backends."""
     runtime.run_manager.save_dirty()
     for backend_state in runtime.backends.values():
+        if isinstance(backend_state.backend, VastBackend):
+            await backend_state.backend.stop_launch_worker()
         if backend_state.ssh_client:
             await backend_state.ssh_client.disconnect()
